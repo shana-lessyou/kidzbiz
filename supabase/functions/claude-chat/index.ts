@@ -54,7 +54,14 @@ serve(async (req) => {
 
     systemParts.push(`\nYOUR PERSONA:\nYou are ${coachName}, the AI business coach for ${childName}${childAge ? `, age ${childAge}` : ''}.`);
 
-    systemParts.push(`\nCURRENT TASK: "${taskTitle}"\n${taskIntro || ''}`);
+    const isGeneralChat = taskTitle === 'General Business Coaching';
+    if (isGeneralChat) {
+      systemParts.push(`\nROLE: You are the ongoing business coach for this kid's whole journey. Answer questions openly, encourage progress, and help them connect the dots across all phases.`);
+      systemParts.push(`\nCONTEXT: ${taskIntro || ''}`);
+    } else {
+      systemParts.push(`\nCURRENT TASK: "${taskTitle}"\n${taskIntro || ''}`);
+      systemParts.push(`\nSCOPE RULES: Stay focused on THIS task only. Once the task objective is achieved, briefly summarize what was decided and tell the kid they can mark it done. Do NOT drift into other phases, marketing, future steps, or adjacent topics — those have their own tasks.`);
+    }
 
     if (childAge && childAge <= 11) {
       systemParts.push(`\nAGE ADAPTATION: ${childName} is ${childAge} years old. Use simple vocabulary. Break math into small steps with examples. Be extra encouraging.`);

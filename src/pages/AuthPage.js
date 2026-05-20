@@ -56,6 +56,16 @@ export default function AuthPage() {
   const [error, setError]       = useState('');
   const [loading, setLoading]   = useState(false);
   const [loadingMsg, setLoadingMsg] = useState('');
+  const [resetSent, setResetSent]   = useState(false);
+
+  const handlePasswordReset = async () => {
+    if (!email.trim()) { setError('Enter your email address first.'); return; }
+    setError('');
+    await supabase.auth.resetPasswordForEmail(email.trim(), {
+      redirectTo: `${window.location.origin}/login`,
+    });
+    setResetSent(true);
+  };
 
   const plan = params.get('plan') || 'free';
   const isPaidPlan = plan === 'family' || plan === 'class';
@@ -180,6 +190,14 @@ export default function AuthPage() {
             </button>
           </form>
 
+          {mode === 'signin' && (
+            <div className="mt-3 text-center">
+              {resetSent
+                ? <p className="text-xs text-green-700">Check your email for a reset link.</p>
+                : <button type="button" onClick={handlePasswordReset} className="text-xs text-slate-500 hover:text-brand-600 hover:underline">Forgot password?</button>
+              }
+            </div>
+          )}
           {mode === 'signup' && (
             <p className="mt-4 text-center text-xs text-slate-500">
               By creating an account you agree to our terms of service.

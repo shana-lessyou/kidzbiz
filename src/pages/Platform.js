@@ -395,7 +395,9 @@ function KidDashboard({ child, business, familyId, config, onBack }) {
   const [activePhase, setActivePhase]       = useState('phase0');
   const [selectedTask, setSelectedTask]     = useState(null);
   const [selectedTaskPhase, setSelectedTaskPhase] = useState(null);
-  const [messages, setMessages]             = useState([
+  const savedGeneralChat = getChatHistory(business.id, 'general');
+  const hasGeneralHistory = savedGeneralChat?.some((m) => m.role === 'user');
+  const [messages, setMessages] = useState(hasGeneralHistory ? savedGeneralChat : [
     { id: 1, role: 'assistant', content: `Hi ${child.name}! I'm ${child.coachName}, your coach for ${business.name}. Click any task card to start working through it, or ask me anything here!` },
   ]);
   const [input, setInput]   = useState('');
@@ -438,6 +440,7 @@ function KidDashboard({ child, business, familyId, config, onBack }) {
     }
   }, [tasks, business.id, loadingTasks]);
 
+  useEffect(() => { saveChatHistory(business.id, 'general', messages); }, [messages, business.id]);
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
 
   const updateTaskStatus = useCallback((taskId, phaseKey, newStatus) => {
@@ -467,20 +470,62 @@ function KidDashboard({ child, business, familyId, config, onBack }) {
     updateTaskStatus(taskId, srcPhase, targetStatus);
   };
 
-  const handleSendMessage = () => {
+  const handleSendMessage = async () => {
     if (!input.trim()) return;
-    setMessages((p) => [...p, { id: Date.now(), role: 'user', content: input }]);
+    const userMsg = { id: Date.now(), role: 'user', content: input };
+    const nextMessages = [...messages, userMsg];
+    setMessages(nextMessages);
     setInput('');
     setLoading(true);
-    const lower = input.toLowerCase();
-    setTimeout(() => {
-      const reply = lower.includes('cost') ? `Let's break it down:\n1. Materials — what raw materials?\n2. Packaging — how will you display it?\n3. Labor — time per unit?\n\nTell me what you're making and I'll help you cost it out.`
-        : lower.includes('price') ? `Formula: Selling Price = Cost ÷ 0.40\n\nSo a $5 cost → $12.50 price → $7.50 profit. Adjust based on competitor prices.`
-        : lower.includes('help') ? `Here's what I can help with:\n• Click a task card to work through it step by step\n• Cost & pricing math\n• Brainstorming ideas\n• Craft fair prep\n\nWhat do you need?`
-        : `Good question. Let's think it through:\n1. What are you trying to figure out?\n2. What do you already know?\n3. What's blocking you?\n\nOr click a task card and I'll guide you through it!`;
-      setMessages((p) => [...p, { id: Date.now() + 1, role: 'assistant', content: reply }]);
-      setLoading(false);
-    }, 600);
+
+    let reply = null;
+    if (isConfigured && supabase) {
+      try {
+        const { data: { session: authSession } } = await supabase.auth.getSession();
+        if (authSession) {
+          const coachCfg = getCoachConfig(familyId);
+          // Build full prior context from ALL task conversations for this business
+          const allTaskContext = Object.values(CURRICULUM_TASKS)
+            .flatMap((p) => p.tasks)
+            .map((t) => {
+              const history = getChatHistory(business.id, t.id);
+              if (!history) return null;
+              const lastUser = [...history].reverse().find((m) => m.role === 'user');
+              const lastAsst = [...history].reverse().find((m) => m.role === 'assistant');
+              if (!lastUser || !lastAsst) return null;
+              return `[${t.title}]\nKid: ${lastUser.content.slice(0, 300)}\nCoach: ${lastAsst.content.slice(0, 300)}`;
+            })
+            .filter(Boolean)
+            .join('\n\n');
+
+          const res = await fetch(
+            `${process.env.REACT_APP_SUPABASE_URL}/functions/v1/claude-chat`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authSession.access_token}` },
+              body: JSON.stringify({
+                messages: nextMessages.map((m) => ({ role: m.role, content: m.content })),
+                childName: child.name,
+                childAge: child.age,
+                coachName: child.coachName || 'Coach',
+                taskTitle: 'General Business Coaching',
+                taskIntro: `You are the ongoing coach for ${child.name}'s business "${business.name}". Answer questions, help them think through problems, and encourage them to keep making progress. Be personal and reference their specific business.`,
+                offLimitsTopics: coachCfg.offLimitsTopics,
+                priorContext: allTaskContext,
+              }),
+            }
+          );
+          const json = await res.json();
+          if (json.reply) reply = json.reply;
+        }
+      } catch (_) {}
+    }
+
+    if (!reply) {
+      reply = `Good question! Click a task card to work through it step by step, or keep asking me here — I'm here to help ${business.name} succeed.`;
+    }
+    setMessages((p) => [...p, { id: Date.now() + 1, role: 'assistant', content: reply }]);
+    setLoading(false);
   };
 
   const currentPhase = CURRICULUM_TASKS[activePhase];
