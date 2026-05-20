@@ -461,7 +461,7 @@ function KidDashboard({ child, business, familyId, config, onBack }) {
   return (
     <div className="min-h-screen bg-slate-50">
       {selectedTask && (
-        <TaskModule task={selectedTask} phaseKey={selectedTaskPhase} child={child} businessId={business.id} familyId={familyId} onClose={() => { setSelectedTask(null); setSelectedTaskPhase(null); }} onMarkDone={(id, pk) => { handleMarkDone(id, pk); setSelectedTask(null); setSelectedTaskPhase(null); }} />
+        <TaskModule key={selectedTask.id} task={selectedTask} phaseKey={selectedTaskPhase} child={child} businessId={business.id} familyId={familyId} onClose={() => { setSelectedTask(null); setSelectedTaskPhase(null); }} onMarkDone={(id, pk) => { handleMarkDone(id, pk); setSelectedTask(null); setSelectedTaskPhase(null); }} />
       )}
 
       {showParentRequest && (
