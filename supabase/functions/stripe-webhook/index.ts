@@ -46,19 +46,39 @@ serve(async (req) => {
   try {
     if (event.type === 'checkout.session.completed') {
       const session = event.data.object;
-      const familyId = session.metadata?.family_id || session.subscription_data?.metadata?.family_id;
-      const plan     = session.metadata?.plan     || session.subscription_data?.metadata?.plan || 'family';
 
-      if (familyId) {
-        // Retrieve subscription to get metadata from subscription level
+      // metadata is on the subscription, not the session — always look it up
+      if (session.subscription) {
         const subRes = await fetch(`https://api.stripe.com/v1/subscriptions/${session.subscription}`, {
           headers: { Authorization: `Bearer ${STRIPE_SECRET_KEY}` },
         });
         const sub = await subRes.json();
-        const subFamilyId = sub.metadata?.family_id || familyId;
-        const subPlan     = sub.metadata?.plan     || plan;
+        const familyId = sub.metadata?.family_id;
+        const plan     = sub.metadata?.plan || 'family';
 
-        await supabase.from('families').upsert({ id: subFamilyId, plan_tier: subPlan, stripe_customer_id: session.customer, stripe_subscription_id: session.subscription });
+        console.log('Webhook: familyId=', familyId, 'plan=', plan, 'sub.metadata=', JSON.stringify(sub.metadata));
+
+        if (familyId) {
+          // Get customer email so we can upsert even if the families row is missing
+          const custRes = await fetch(`https://api.stripe.com/v1/customers/${session.customer}`, {
+            headers: { Authorization: `Bearer ${STRIPE_SECRET_KEY}` },
+          });
+          const customer = await custRes.json();
+          const email = customer.email || '';
+
+          const { error: upsertErr } = await supabase
+            .from('families')
+            .upsert({
+              id: familyId,
+              email,
+              plan_tier: plan,
+              stripe_customer_id: session.customer,
+              stripe_subscription_id: session.subscription,
+            }, { onConflict: 'id' });
+          console.log('Upsert result:', upsertErr ? upsertErr.message : 'ok — plan_tier=' + plan);
+        } else {
+          console.error('No family_id in subscription metadata — cannot update plan');
+        }
       }
     }
 
