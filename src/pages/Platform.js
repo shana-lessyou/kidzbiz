@@ -153,6 +153,28 @@ function getCoachConfig(familyId) {
 }
 function saveCoachConfig(familyId, cfg) { localStorage.setItem(`kb_coach_${familyId}`, JSON.stringify(cfg)); }
 
+function getChatHistory(businessId, taskId) {
+  try { return JSON.parse(localStorage.getItem(`kb_chat_${businessId}_${taskId}`) || 'null'); } catch { return null; }
+}
+function saveChatHistory(businessId, taskId, messages) {
+  localStorage.setItem(`kb_chat_${businessId}_${taskId}`, JSON.stringify(messages));
+}
+function getPriorTaskContext(businessId, currentTaskId) {
+  const allTasks = Object.values(CURRICULUM_TASKS).flatMap((p) => p.tasks);
+  const snippets = [];
+  for (const t of allTasks) {
+    if (t.id === currentTaskId) continue;
+    const history = getChatHistory(businessId, t.id);
+    if (!history) continue;
+    const lastUser = [...history].reverse().find((m) => m.role === 'user');
+    const lastAssistant = [...history].reverse().find((m) => m.role === 'assistant');
+    if (lastUser && lastAssistant) {
+      snippets.push(`[${t.title}]\nKid: ${lastUser.content.slice(0, 300)}\nCoach: ${lastAssistant.content.slice(0, 300)}`);
+    }
+  }
+  return snippets.join('\n\n');
+}
+
 function getNotifications(familyId) {
   try { return JSON.parse(localStorage.getItem(`kb_notifications_${familyId}`) || '[]'); } catch { return []; }
 }
@@ -174,17 +196,23 @@ function TaskModule({ task, phaseKey, child, businessId, familyId, onClose, onMa
   const coachCfg = getCoachConfig(familyId);
   const isMathTask = ['cost-breakdown', 'pricing-strategy', 'revenue-forecast'].includes(task.id);
   const isYoungKid = child.age && child.age <= 11;
-  const initialMsgs = [{ id: 1, role: 'assistant', content: mod ? mod.coachOpener : `Let's work on "${task.title}"! Tell me where you're at with this step.` }];
+  const freshMsgs = [{ id: 1, role: 'assistant', content: mod ? mod.coachOpener : `Let's work on "${task.title}"! Tell me where you're at with this step.` }];
   if (task.id === 'op-spot' && coachCfg.seedIdeas) {
-    initialMsgs.push({ id: 2, role: 'assistant', content: `Also, your parent shared some ideas they thought might work well for you:\n\n"${coachCfg.seedIdeas}"\n\nFeel free to use one of those as a starting point — or go with something totally different!` });
+    freshMsgs.push({ id: 2, role: 'assistant', content: `Also, your parent shared some ideas they thought might work well for you:\n\n"${coachCfg.seedIdeas}"\n\nFeel free to use one of those as a starting point — or go with something totally different!` });
   }
 
-  const [messages, setMessages] = useState(initialMsgs);
+  // Restore saved conversation for this task, or start fresh
+  const savedHistory = getChatHistory(businessId, task.id);
+  const hasUserMsg = savedHistory?.some((m) => m.role === 'user');
+  const [messages, setMessages] = useState(hasUserMsg ? savedHistory : freshMsgs);
   const [input, setInput]         = useState('');
   const [loading, setLoading]     = useState(false);
   const [promptIndex, setPromptIndex] = useState(0);
   const [showDone, setShowDone]   = useState(false);
   const messagesEndRef = useRef(null);
+
+  // Persist chat after every exchange
+  useEffect(() => { saveChatHistory(businessId, task.id, messages); }, [messages, businessId, task.id]);
 
   const handlePrint = () => {
     const lines = messages.map((msg) => {
@@ -232,6 +260,7 @@ function TaskModule({ task, phaseKey, child, businessId, familyId, onClose, onMa
                 taskIntro: mod?.intro,
                 offLimitsTopics: coachCfg.offLimitsTopics,
                 seedIdeas: task.id === 'op-spot' ? coachCfg.seedIdeas : '',
+                priorContext: getPriorTaskContext(businessId, task.id),
               }),
             }
           );

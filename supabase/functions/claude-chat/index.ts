@@ -46,6 +46,7 @@ serve(async (req) => {
       taskIntro,        // string
       offLimitsTopics,  // string
       seedIdeas,        // string (only for op-spot)
+      priorContext,     // string — last exchange from each previously-visited task
     } = await req.json();
 
     // Build the full system prompt
@@ -65,6 +66,10 @@ serve(async (req) => {
 
     if (seedIdeas) {
       systemParts.push(`\nPARENT-SUGGESTED IDEAS: The parent has shared these ideas for ${childName}: "${seedIdeas}". You may gently mention these as options if relevant, but do not force them.`);
+    }
+
+    if (priorContext) {
+      systemParts.push(`\nPRIOR TASK CONTEXT (what ${childName} has already worked through — use this to give relevant, personalized advice):\n${priorContext}`);
     }
 
     systemParts.push(`\nAlways respond in 2–4 sentences. Ask one clear question at the end of each response. Never give long lectures.`);
