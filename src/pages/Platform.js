@@ -625,6 +625,7 @@ function BusinessHub({ child, familyId, config, onBack }) {
   const [creating, setCreating]         = useState(false);
   const [showCreate, setShowCreate]     = useState(false);
   const [activeBiz, setActiveBiz]       = useState(null);
+  const [createError, setCreateError]   = useState('');
 
   const lsKey = `kb_businesses_${child.id}`;
 
@@ -642,9 +643,15 @@ function BusinessHub({ child, familyId, config, onBack }) {
   const handleCreate = async () => {
     if (!newName.trim()) return;
     setCreating(true);
+    setCreateError('');
     const biz = { id: crypto.randomUUID(), child_id: child.id, family_id: familyId, name: newName.trim(), description: '', budget: parseInt(newBudget) || 100, launch_date: newLaunchDate || null, created_at: new Date().toISOString() };
     if (isConfigured && supabase) {
-      const { data } = await supabase.from('businesses').insert(biz).select().single();
+      const { data, error } = await supabase.from('businesses').insert(biz).select().single();
+      if (error) {
+        setCreateError(error.message || 'Save failed — please try again.');
+        setCreating(false);
+        return;
+      }
       if (data) setBusinesses((p) => [...p, data]);
     } else {
       const updated = [...businesses, biz];
@@ -713,6 +720,7 @@ function BusinessHub({ child, familyId, config, onBack }) {
                 <input type="date" value={newLaunchDate} onChange={(e) => setNewLaunchDate(e.target.value)} className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 transition" />
               </div>
             </div>
+            {createError && <p className="text-xs text-rose-600 mb-2">{createError}</p>}
             <div className="flex gap-2">
               <button onClick={handleCreate} disabled={creating || !newName.trim()} className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-lg bg-brand-600 text-white font-semibold text-sm hover:bg-brand-700 disabled:opacity-50 transition">{creating ? 'Creating…' : 'Create business'}</button>
               <button onClick={() => { setShowCreate(false); setNewName(''); setNewBudget('100'); setNewLaunchDate(''); }} className="inline-flex items-center px-4 py-2 rounded-lg border border-slate-300 text-slate-600 text-sm hover:bg-slate-50 transition">Cancel</button>
