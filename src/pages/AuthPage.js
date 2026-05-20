@@ -79,24 +79,35 @@ export default function AuthPage() {
       }
 
       let accessToken = null;
+      let userId = null;
 
       if (mode === 'signup') {
         setLoadingMsg('Creating your account…');
         const { data, error: signUpErr } = await signUp(email, password);
         if (signUpErr) throw signUpErr;
         accessToken = data?.session?.access_token ?? null;
+        userId = data?.session?.user?.id ?? null;
       } else {
         setLoadingMsg('Signing in…');
         const { data, error: signInErr } = await signIn(email, password);
         if (signInErr) throw signInErr;
         accessToken = data?.session?.access_token ?? null;
+        userId = data?.session?.user?.id ?? null;
       }
 
-      if (isPaidPlan && accessToken) {
-        setLoadingMsg('Redirecting to payment…');
-        const redirected = await redirectToCheckout(plan, accessToken);
-        if (redirected) return; // browser navigates away
-        // If checkout fails, fall through to app with a note
+      if (isPaidPlan && accessToken && userId) {
+        // Skip checkout if already on a paid plan
+        const { data: familyRow } = await supabase
+          .from('families')
+          .select('plan_tier')
+          .eq('id', userId)
+          .single();
+        const alreadyPaid = familyRow?.plan_tier === 'family' || familyRow?.plan_tier === 'class';
+        if (!alreadyPaid) {
+          setLoadingMsg('Redirecting to payment…');
+          const redirected = await redirectToCheckout(plan, accessToken);
+          if (redirected) return;
+        }
       }
 
       navigate('/app');
