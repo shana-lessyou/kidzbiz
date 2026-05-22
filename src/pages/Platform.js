@@ -159,20 +159,27 @@ function getChatHistory(businessId, taskId) {
 function saveChatHistory(businessId, taskId, messages) {
   localStorage.setItem(`kb_chat_${businessId}_${taskId}`, JSON.stringify(messages));
 }
-function getPriorTaskContext(businessId, currentTaskId) {
+function getPriorTaskContext(businessId, currentTaskId, maxTasks = 3, maxChars = 1200) {
   const allTasks = Object.values(CURRICULUM_TASKS).flatMap((p) => p.tasks);
-  const snippets = [];
+  // Collect tasks that have real conversation, with their last-message timestamp
+  const candidates = [];
   for (const t of allTasks) {
     if (t.id === currentTaskId) continue;
     const history = getChatHistory(businessId, t.id);
     if (!history) continue;
     const lastUser = [...history].reverse().find((m) => m.role === 'user');
-    const lastAssistant = [...history].reverse().find((m) => m.role === 'assistant');
-    if (lastUser && lastAssistant) {
-      snippets.push(`[${t.title}]\nKid: ${lastUser.content.slice(0, 300)}\nCoach: ${lastAssistant.content.slice(0, 300)}`);
+    const lastAsst = [...history].reverse().find((m) => m.role === 'assistant');
+    if (lastUser && lastAsst) {
+      const lastId = Math.max(...history.map((m) => m.id || 0));
+      candidates.push({ title: t.title, lastId, lastUser: lastUser.content, lastAsst: lastAsst.content });
     }
   }
-  return snippets.join('\n\n');
+  // Use the N most recently active tasks (highest message id = most recent)
+  const recent = candidates.sort((a, b) => b.lastId - a.lastId).slice(0, maxTasks);
+  const joined = recent
+    .map((c) => `[${c.title}]\nKid: ${c.lastUser.slice(0, 250)}\nCoach: ${c.lastAsst.slice(0, 250)}`)
+    .join('\n\n');
+  return joined.slice(0, maxChars);
 }
 
 function getNotifications(familyId) {
@@ -217,10 +224,28 @@ function TaskModule({ task, phaseKey, child, businessId, familyId, onClose, onMa
   const [loading, setLoading]     = useState(false);
   const [promptIndex, setPromptIndex] = useState(0);
   const [showDone, setShowDone]   = useState(false);
+  const [listening, setListening] = useState(false);
   const messagesEndRef = useRef(null);
+  const recognitionRef = useRef(null);
 
   // Persist chat after every exchange
   useEffect(() => { saveChatHistory(businessId, task.id, messages); }, [messages, businessId, task.id]);
+
+  const startListening = () => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) return;
+    const rec = new SR();
+    rec.continuous = false;
+    rec.interimResults = false;
+    rec.lang = 'en-US';
+    rec.onresult = (e) => { setInput((prev) => (prev ? prev + ' ' : '') + e.results[0][0].transcript); };
+    rec.onend = () => setListening(false);
+    rec.onerror = () => setListening(false);
+    recognitionRef.current = rec;
+    rec.start();
+    setListening(true);
+  };
+  const stopListening = () => { recognitionRef.current?.stop(); setListening(false); };
 
   const handlePrint = () => {
     const lines = messages.map((msg) => {
@@ -378,7 +403,12 @@ function TaskModule({ task, phaseKey, child, businessId, familyId, onClose, onMa
             </button>
           )}
           <div className="flex gap-2">
-            <input type="text" placeholder={`Answer ${child.coachName}…`} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && handleSend()} disabled={loading} className="flex-1 px-3.5 py-2.5 rounded-lg border border-slate-300 bg-white text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-brand-500 transition text-sm" />
+            <input type="text" placeholder={listening ? '🎤 Listening…' : `Answer ${child.coachName}…`} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && handleSend()} disabled={loading} className="flex-1 px-3.5 py-2.5 rounded-lg border border-slate-300 bg-white text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-brand-500 transition text-sm" />
+            {(window.SpeechRecognition || window.webkitSpeechRecognition) && (
+              <button type="button" onClick={listening ? stopListening : startListening} className={`inline-flex items-center justify-center px-3 py-2.5 rounded-lg border text-sm transition ${listening ? 'bg-rose-50 border-rose-300 text-rose-600 animate-pulse' : 'border-slate-300 text-slate-500 hover:bg-slate-50'}`} title="Speak your answer">
+                🎤
+              </button>
+            )}
             <button onClick={handleSend} disabled={loading || !input.trim()} className="inline-flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg bg-brand-600 text-white font-semibold text-sm hover:bg-brand-700 disabled:opacity-50 transition">
               <Send size={16} />
             </button>
@@ -406,7 +436,23 @@ function KidDashboard({ child, business, familyId, config, onBack }) {
   const [showParentRequest, setShowParentRequest] = useState(false);
   const [parentRequestMsg, setParentRequestMsg]   = useState('');
   const [requestSent, setRequestSent]             = useState(false);
-  const messagesEndRef = useRef(null);
+  const [sidebarListening, setSidebarListening]   = useState(false);
+  const messagesEndRef    = useRef(null);
+  const sidebarRecRef     = useRef(null);
+
+  const startSidebarListening = () => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) return;
+    const rec = new SR();
+    rec.continuous = false; rec.interimResults = false; rec.lang = 'en-US';
+    rec.onresult = (e) => { setInput((p) => (p ? p + ' ' : '') + e.results[0][0].transcript); };
+    rec.onend = () => setSidebarListening(false);
+    rec.onerror = () => setSidebarListening(false);
+    sidebarRecRef.current = rec;
+    rec.start();
+    setSidebarListening(true);
+  };
+  const stopSidebarListening = () => { sidebarRecRef.current?.stop(); setSidebarListening(false); };
 
   const handleSendParentRequest = () => {
     addNotification(familyId, {
@@ -688,7 +734,12 @@ function KidDashboard({ child, business, familyId, config, onBack }) {
             <div ref={messagesEndRef} />
           </div>
           <div className="border-t border-slate-100 p-3 flex gap-2">
-            <input type="text" placeholder={`Ask ${child.coachName} anything…`} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()} disabled={loading} className="flex-1 px-3.5 py-2.5 rounded-lg border border-slate-300 bg-white text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-brand-500 transition text-sm" />
+            <input type="text" placeholder={sidebarListening ? '🎤 Listening…' : `Ask ${child.coachName} anything…`} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()} disabled={loading} className="flex-1 px-3.5 py-2.5 rounded-lg border border-slate-300 bg-white text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-brand-500 transition text-sm" />
+            {(window.SpeechRecognition || window.webkitSpeechRecognition) && (
+              <button type="button" onClick={sidebarListening ? stopSidebarListening : startSidebarListening} className={`inline-flex items-center justify-center px-3 py-2.5 rounded-lg border text-sm transition ${sidebarListening ? 'bg-rose-50 border-rose-300 text-rose-600 animate-pulse' : 'border-slate-300 text-slate-500 hover:bg-slate-50'}`} title="Speak your question">
+                🎤
+              </button>
+            )}
             <button onClick={handleSendMessage} disabled={loading || !input.trim()} className="inline-flex items-center justify-center px-3 py-2.5 rounded-lg bg-brand-600 text-white font-semibold text-sm hover:bg-brand-700 disabled:opacity-50 transition"><Send size={16} /></button>
           </div>
         </div>
