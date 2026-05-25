@@ -120,7 +120,8 @@ export default function AuthPage() {
         }
       }
 
-      navigate('/app');
+      // Show welcome screen for new signups; signins go straight to /app
+      navigate(mode === 'signup' ? '/app?welcome=1' : '/app');
     } catch (err) {
       setError(err.message || 'Something went wrong. Please try again.');
     } finally {

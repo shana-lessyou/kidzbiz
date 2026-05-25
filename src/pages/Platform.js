@@ -1146,6 +1146,15 @@ function FamilyHub({ onOpenParent }) {
 
         {loading ? (
           <div className="flex justify-center py-16"><div className="w-8 h-8 rounded-full border-2 border-brand-600 border-t-transparent animate-spin" /></div>
+        ) : children.length === 0 ? (
+          <div className="bg-white rounded-2xl border-2 border-dashed border-brand-200 p-12 text-center shadow-card">
+            <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-brand-100 to-accent-100 flex items-center justify-center mx-auto mb-4 text-3xl">🧒</div>
+            <h3 className="font-bold text-slate-900 text-lg">Add your first child to get started</h3>
+            <p className="text-sm text-slate-500 mt-2 max-w-sm mx-auto">Each child gets their own business, AI coach, and curriculum. You stay in control from Settings.</p>
+            <button onClick={() => setShowAddChild(true)} className="mt-5 inline-flex items-center gap-2 px-5 py-3 rounded-xl bg-brand-600 text-white font-bold text-sm hover:bg-brand-700 transition">
+              <Plus size={16} /> Add first child
+            </button>
+          </div>
         ) : (
           <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-4">
             {children.map((child) => (
@@ -1472,30 +1481,102 @@ function ParentConsole({ onBack }) {
   );
 }
 
+// ============ WELCOME / ONBOARDING MODAL ============
+function WelcomeModal({ trialStarted, onDone }) {
+  const steps = [
+    { emoji: '🧒', title: 'Add a child', desc: 'Create a profile with their name, age, and a PIN so they can log in independently.' },
+    { emoji: '💼', title: 'Start a business', desc: 'Name it, set a startup budget, and pick a launch date. One business at a time.' },
+    { emoji: '🤖', title: 'Get coached', desc: 'Work through 5 phases — from idea to craft fair day — guided by an AI business coach.' },
+  ];
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/70 backdrop-blur-sm">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-xl overflow-hidden">
+        {/* Header */}
+        <div className="bg-gradient-to-br from-brand-600 to-accent-600 px-8 py-7 text-white">
+          <div className="flex justify-center mb-3"><Logo size="md" /></div>
+          <h1 className="text-2xl font-extrabold text-center mt-2">
+            {trialStarted ? '🎉 Your trial has started!' : 'Welcome to KidzBiz!'}
+          </h1>
+          <p className="text-brand-100 text-sm text-center mt-1">
+            {trialStarted
+              ? 'Your 14-day free trial is active. Here\'s how to get the most out of it.'
+              : 'Help your child build a real business — from idea to first sale.'}
+          </p>
+        </div>
+
+        {/* Steps */}
+        <div className="px-8 py-6">
+          <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-4">How it works</p>
+          <div className="space-y-4">
+            {steps.map((s, i) => (
+              <div key={i} className="flex items-start gap-4">
+                <div className="w-10 h-10 rounded-xl bg-brand-50 flex items-center justify-center text-xl shrink-0">{s.emoji}</div>
+                <div>
+                  <p className="font-semibold text-slate-900">{s.title}</p>
+                  <p className="text-sm text-slate-500 mt-0.5">{s.desc}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="mt-6 p-4 bg-amber-50 border border-amber-200 rounded-xl text-sm text-amber-800">
+            <strong>Parent tip:</strong> KidzBiz is parent-supervised. You control settings, approve requests, and watch progress — all from the Settings button in the top right.
+          </div>
+        </div>
+
+        {/* CTA */}
+        <div className="px-8 pb-7 flex flex-col gap-2">
+          <button onClick={onDone} className="w-full inline-flex items-center justify-center gap-2 px-5 py-3 rounded-xl bg-brand-600 text-white font-bold text-sm hover:bg-brand-700 transition">
+            Add my first child <ChevronRight size={16} />
+          </button>
+          <button onClick={onDone} className="w-full text-xs text-slate-400 hover:text-slate-600 py-1 transition">
+            I'll explore first
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ============ MAIN PLATFORM ROUTER ============
 export default function Platform() {
-  const [showParent, setShowParent] = useState(false);
-  const [activated, setActivated]   = useState(false);
+  const { session } = useAuth();
+  const [showParent, setShowParent]     = useState(false);
+  const [showWelcome, setShowWelcome]   = useState(false);
+  const [trialStarted, setTrialStarted] = useState(false);
 
   useLayoutEffect(() => {
-    if (window.location.search.includes('activated=1')) {
-      setActivated(true);
-      // Clean the URL without triggering a re-render
+    const search = window.location.search;
+    const isWelcome   = search.includes('welcome=1');
+    const isActivated = search.includes('activated=1');
+
+    if (isWelcome || isActivated) {
+      setShowWelcome(true);
+      setTrialStarted(isActivated);
       window.history.replaceState({}, '', '/app');
     }
   }, []);
 
+  // Also show welcome on very first visit (no URL param needed if they navigated directly)
+  useEffect(() => {
+    if (!session?.user) return;
+    const key = `kb_welcomed_${session.user.id}`;
+    if (!localStorage.getItem(key) && !showWelcome) {
+      // Only auto-show if they have no children yet (checked lazily — just show it)
+      // We don't force it — only URL params trigger it. This is the safeguard.
+    }
+  }, [session, showWelcome]);
+
+  const handleWelcomeDone = () => {
+    if (session?.user) {
+      localStorage.setItem(`kb_welcomed_${session.user.id}`, '1');
+    }
+    setShowWelcome(false);
+  };
+
   return (
     <>
-      {activated && (
-        <div className="fixed top-0 inset-x-0 z-50 bg-emerald-600 text-white flex items-center justify-between px-6 py-3 shadow-lg">
-          <div className="flex items-center gap-2.5">
-            <CheckCircle2 size={18} />
-            <span className="font-semibold text-sm">Your plan is active — welcome to KidzBiz! Your 14-day trial has started.</span>
-          </div>
-          <button onClick={() => setActivated(false)} className="p-1 rounded hover:bg-emerald-700 transition"><X size={16} /></button>
-        </div>
-      )}
+      {showWelcome && <WelcomeModal trialStarted={trialStarted} onDone={handleWelcomeDone} />}
       {showParent
         ? <ParentConsole onBack={() => setShowParent(false)} />
         : <FamilyHub onOpenParent={() => setShowParent(true)} />
