@@ -1182,21 +1182,78 @@ function FamilyHub({ onOpenParent }) {
 // ============ PARENT CONSOLE ============
 function ParentConsole({ onBack }) {
   const { session, family, signOut } = useAuth();
-  const [activeTab, setActiveTab] = useState('timeline');
+  const [activeTab, setActiveTab] = useState('progress');
   const [config, setConfig] = useState({ budgetMin: 50, budgetMax: 500, timelines: { phase0: '2026-05-16', phase1: '2026-05-31', phase2: '2026-06-07', phase3: '2026-06-21', phase4: '2026-06-30' }, integrations: { claude: false, googleDrive: false, n8n: false, obsidian: false } });
   const [budgetMin, setBudgetMin] = useState(50);
   const [budgetMax, setBudgetMax] = useState(500);
   const [apiKey, setApiKey]       = useState('');
   const [showApiKey, setShowApiKey] = useState(false);
-  const [notifications, setNotifications] = useState([]);
-  const [coachCfg, setCoachCfgState] = useState(() => getCoachConfig(session?.user?.id || 'demo'));
-  const [usageStats, setUsageStats]   = useState(null);
+  const [notifications, setNotifications]   = useState([]);
+  const [coachCfg, setCoachCfgState]        = useState(() => getCoachConfig(session?.user?.id || 'demo'));
+  const [usageStats, setUsageStats]         = useState(null);
+  const [progressData, setProgressData]     = useState(null);
+  const [loadingProgress, setLoadingProgress] = useState(false);
+
   const updateCoachCfg = (partial) => {
     const next = { ...coachCfg, ...partial };
     setCoachCfgState(next);
     saveCoachConfig(session?.user?.id || 'demo', next);
   };
-  const tabs = [{ id: 'timeline', label: 'Timeline', Icon: Calendar }, { id: 'budget', label: 'Budget', Icon: DollarSign }, { id: 'coach', label: 'AI Coach', Icon: Sparkles }, { id: 'integrations', label: 'Integrations', Icon: LinkIcon }, { id: 'requests', label: 'Requests', Icon: Bell }, { id: 'usage', label: 'Usage', Icon: BarChart2 }];
+  const tabs = [
+    { id: 'progress',     label: 'Progress',     Icon: BarChart3   },
+    { id: 'requests',     label: 'Requests',     Icon: Bell        },
+    { id: 'coach',        label: 'AI Coach',     Icon: Sparkles    },
+    { id: 'timeline',     label: 'Timeline',     Icon: Calendar    },
+    { id: 'budget',       label: 'Budget',       Icon: DollarSign  },
+    { id: 'integrations', label: 'Integrations', Icon: LinkIcon    },
+    { id: 'usage',        label: 'Usage',        Icon: BarChart2   },
+  ];
+
+  // Load progress data when the tab is shown
+  useEffect(() => {
+    if (activeTab !== 'progress' || !isConfigured || !supabase || !session || progressData || loadingProgress) return;
+    setLoadingProgress(true);
+    const famId = session.user.id;
+    const totalTasks = Object.values(CURRICULUM_TASKS).reduce((s, p) => s + p.tasks.length, 0);
+
+    Promise.all([
+      supabase.from('children').select('*').eq('family_id', famId).order('created_at'),
+      supabase.from('businesses').select('*').eq('family_id', famId).order('created_at'),
+      supabase.from('task_states').select('*').eq('family_id', famId),
+    ]).then(([{ data: kids }, { data: bizzes }, { data: states }]) => {
+      const allKids  = kids   || [];
+      const allBizzes = bizzes || [];
+      const allStates = states || [];
+
+      const result = allKids.map((child) => {
+        const childBizzes = allBizzes.filter((b) => b.child_id === child.id);
+        return {
+          child,
+          businesses: childBizzes.map((biz) => {
+            const bizStates = allStates.filter((s) => s.business_id === biz.id);
+            const doneSet   = new Set(bizStates.filter((s) => s.status === 'done').map((s) => s.task_id));
+            const phases = Object.entries(CURRICULUM_TASKS).map(([key, phase]) => {
+              const done = phase.tasks.filter((t) => doneSet.has(t.id)).length;
+              return {
+                key, label: phase.label, short: phase.short, accent: phase.accent,
+                total: phase.tasks.length, done,
+                status: done === 0 ? 'todo' : done === phase.tasks.length ? 'done' : 'inprogress',
+              };
+            });
+            const lastState = [...bizStates].sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at))[0];
+            return {
+              business: biz, phases,
+              totalTasks, doneTasks: doneSet.size,
+              pct: Math.round((doneSet.size / totalTasks) * 100),
+              lastActivity: lastState?.updated_at || biz.created_at,
+            };
+          }),
+        };
+      });
+      setProgressData(result);
+      setLoadingProgress(false);
+    });
+  }, [activeTab, session, progressData, loadingProgress]);
 
   useEffect(() => {
     const famId = session?.user?.id || 'demo';
@@ -1272,6 +1329,133 @@ function ParentConsole({ onBack }) {
         <div className="border-b border-slate-200 mb-8 flex gap-1 overflow-x-auto">
           {tabs.map((t) => <button key={t.id} onClick={() => setActiveTab(t.id)} className={`inline-flex items-center gap-2 px-4 py-2.5 text-sm font-semibold border-b-2 transition ${activeTab === t.id ? 'border-brand-600 text-brand-700' : 'border-transparent text-slate-500 hover:text-slate-700'}`}><t.Icon size={16} />{t.label}</button>)}
         </div>
+
+        {activeTab === 'progress' && (
+          <section>
+            <div className="flex items-center justify-between mb-6">
+              <div>
+                <h2 className="text-lg font-semibold text-slate-900">Child progress</h2>
+                <p className="text-sm text-slate-500 mt-0.5">Phase-by-phase view of each child's business journey.</p>
+              </div>
+              <button onClick={() => setProgressData(null)} className="text-xs text-brand-600 hover:underline">Refresh</button>
+            </div>
+
+            {loadingProgress ? (
+              <div className="flex justify-center py-16"><div className="w-8 h-8 rounded-full border-2 border-brand-600 border-t-transparent animate-spin" /></div>
+            ) : !progressData || progressData.length === 0 ? (
+              <div className="bg-white rounded-xl border border-slate-200 p-10 text-center shadow-card">
+                <p className="text-2xl mb-2">🧒</p>
+                <p className="font-semibold text-slate-700">No children added yet</p>
+                <p className="text-sm text-slate-500 mt-1">Go back and add a child to get started.</p>
+              </div>
+            ) : (
+              <div className="space-y-8">
+                {progressData.map(({ child, businesses }) => (
+                  <div key={child.id}>
+                    {/* Child header */}
+                    <div className="flex items-center gap-3 mb-3">
+                      <div className="w-10 h-10 rounded-full bg-gradient-to-br from-brand-100 to-accent-100 text-brand-700 flex items-center justify-center font-bold text-lg ring-1 ring-brand-200">
+                        {child.name.charAt(0).toUpperCase()}
+                      </div>
+                      <div>
+                        <p className="font-bold text-slate-900">{child.name}</p>
+                        <p className="text-xs text-slate-500">Age {child.age} · Coach: {child.coach_name}</p>
+                      </div>
+                    </div>
+
+                    {businesses.length === 0 ? (
+                      <div className="bg-white rounded-xl border border-dashed border-slate-300 p-6 text-center text-sm text-slate-400">
+                        No businesses started yet
+                      </div>
+                    ) : (
+                      <div className="space-y-4">
+                        {businesses.map(({ business, phases, totalTasks, doneTasks, pct, lastActivity }) => {
+                          const relativeTime = (() => {
+                            const diff = Math.floor((Date.now() - new Date(lastActivity)) / 60000);
+                            if (diff < 2)   return 'Just now';
+                            if (diff < 60)  return `${diff}m ago`;
+                            if (diff < 1440) return `${Math.floor(diff / 60)}h ago`;
+                            return `${Math.floor(diff / 1440)}d ago`;
+                          })();
+
+                          return (
+                            <div key={business.id} className="bg-white rounded-xl border border-slate-200 p-5 shadow-card">
+                              {/* Business header row */}
+                              <div className="flex items-start justify-between gap-3 mb-4">
+                                <div>
+                                  <p className="font-bold text-slate-900 text-base">{business.name}</p>
+                                  <p className="text-xs text-slate-400 mt-0.5">Last activity: {relativeTime}</p>
+                                </div>
+                                <div className="text-right shrink-0">
+                                  <p className="text-2xl font-extrabold text-brand-600">{pct}%</p>
+                                  <p className="text-xs text-slate-500">{doneTasks}/{totalTasks} tasks</p>
+                                </div>
+                              </div>
+
+                              {/* Overall progress bar */}
+                              <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden mb-5">
+                                <div
+                                  className="h-full bg-gradient-to-r from-brand-500 to-accent-500 rounded-full transition-all"
+                                  style={{ width: `${Math.max(2, pct)}%` }}
+                                />
+                              </div>
+
+                              {/* Phase chips */}
+                              <div className="grid grid-cols-5 gap-2">
+                                {phases.map((phase) => (
+                                  <div key={phase.key} className={`rounded-lg p-2.5 text-center border ${
+                                    phase.status === 'done'       ? 'bg-emerald-50 border-emerald-200' :
+                                    phase.status === 'inprogress' ? 'bg-amber-50 border-amber-200' :
+                                                                    'bg-slate-50 border-slate-200'
+                                  }`}>
+                                    <p className={`text-[10px] font-bold uppercase tracking-wide mb-1 ${
+                                      phase.status === 'done'       ? 'text-emerald-700' :
+                                      phase.status === 'inprogress' ? 'text-amber-700' :
+                                                                      'text-slate-400'
+                                    }`}>{phase.short}</p>
+                                    <p className={`text-sm font-extrabold ${
+                                      phase.status === 'done'       ? 'text-emerald-600' :
+                                      phase.status === 'inprogress' ? 'text-amber-600' :
+                                                                      'text-slate-400'
+                                    }`}>{phase.done}/{phase.total}</p>
+                                    {phase.status === 'done' && (
+                                      <p className="text-[9px] text-emerald-600 font-semibold mt-0.5">✓ Done</p>
+                                    )}
+                                    {phase.status === 'inprogress' && (
+                                      <p className="text-[9px] text-amber-600 font-semibold mt-0.5">In progress</p>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+
+                              {/* Budget + launch date quick stats */}
+                              {(business.budget || business.launch_date) && (
+                                <div className="flex gap-4 mt-4 pt-4 border-t border-slate-100">
+                                  {business.budget && (
+                                    <div className="flex items-center gap-1.5 text-xs text-slate-500">
+                                      <DollarSign size={12} className="text-slate-400" />
+                                      Budget: <span className="font-semibold text-slate-700">${business.budget}</span>
+                                    </div>
+                                  )}
+                                  {business.launch_date && (
+                                    <div className="flex items-center gap-1.5 text-xs text-slate-500">
+                                      <Calendar size={12} className="text-slate-400" />
+                                      Launch: <span className="font-semibold text-slate-700">{new Date(business.launch_date).toLocaleDateString()}</span>
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        )}
 
         {activeTab === 'timeline' && (
           <section>
