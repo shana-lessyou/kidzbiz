@@ -147,6 +147,48 @@ async function persistTaskStatus(businessId, familyId, taskId, phaseKey, status)
   );
 }
 
+// ── Plan limits & info ────────────────────────────────────────────────────
+const PLAN_LIMITS = { free: 1, family: 4, class: 30 };
+const PLAN_INFO = {
+  free:   { name: 'Free',        price: 'Free',    childLabel: '1 child',       features: ['1 child', 'Full curriculum', 'AI coach'] },
+  family: { name: 'Family',      price: '$12/mo',  childLabel: 'Up to 4 kids',  features: ['Up to 4 children', 'Full curriculum', 'AI coach', '14-day free trial'], plan: 'family' },
+  class:  { name: 'Classroom',   price: '$29/mo',  childLabel: 'Up to 30 kids', features: ['Up to 30 children', 'Full curriculum', 'AI coach', 'Class management', '14-day free trial'], plan: 'class' },
+};
+
+// ── Checkout helpers (used in FamilyHub & ParentConsole) ──────────────────
+async function getAccessToken() {
+  if (!isConfigured || !supabase) return null;
+  const { data: { session } } = await supabase.auth.getSession();
+  return session?.access_token ?? null;
+}
+async function startCheckout(plan) {
+  const token = await getAccessToken();
+  if (!token) return;
+  try {
+    const res = await fetch(`${process.env.REACT_APP_SUPABASE_URL}/functions/v1/create-checkout`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ plan, successUrl: `${window.location.origin}/app?activated=1`, cancelUrl: `${window.location.origin}/app` }),
+    });
+    const json = await res.json();
+    if (json.url) window.location.href = json.url;
+  } catch (e) { console.error('checkout error', e); }
+}
+async function openBillingPortal() {
+  const token = await getAccessToken();
+  if (!token) return;
+  try {
+    const res = await fetch(`${process.env.REACT_APP_SUPABASE_URL}/functions/v1/create-portal`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ returnUrl: `${window.location.origin}/app` }),
+    });
+    const json = await res.json();
+    if (json.url) window.location.href = json.url;
+    else alert(json.error || 'Could not open billing portal.');
+  } catch (e) { console.error('portal error', e); }
+}
+
 const DEFAULT_COACH_CONFIG = { seedIdeas: '', offLimitsTopics: 'adult content, violence, politics, anything inappropriate for kids', safeMode: true, parentApprovals: { purchases: true, transportation: true }, amazonLinks: false };
 function getCoachConfig(familyId) {
   try { return { ...DEFAULT_COACH_CONFIG, ...JSON.parse(localStorage.getItem(`kb_coach_${familyId}`) || 'null') }; } catch { return DEFAULT_COACH_CONFIG; }
@@ -192,6 +234,49 @@ function addNotification(familyId, notif) {
 function updateNotificationStatus(familyId, id, status) {
   const updated = getNotifications(familyId).map((n) => n.id === id ? { ...n, status } : n);
   localStorage.setItem(`kb_notifications_${familyId}`, JSON.stringify(updated));
+}
+
+// ============ UPGRADE MODAL ============
+function UpgradeModal({ reason, onClose }) {
+  const [loading, setLoading] = useState(null);
+  const handle = async (plan) => {
+    setLoading(plan);
+    await startCheckout(plan);
+    setLoading(null);
+  };
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg p-7">
+        <div className="flex items-start justify-between mb-1">
+          <div>
+            <h2 className="text-xl font-bold text-slate-900">Unlock more kids</h2>
+            <p className="text-sm text-slate-500 mt-1">{reason || 'Upgrade to add more children to your account.'}</p>
+          </div>
+          <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 transition"><X size={18} /></button>
+        </div>
+        <div className="grid sm:grid-cols-2 gap-4 mt-6">
+          {['family', 'class'].map((plan) => {
+            const info = PLAN_INFO[plan];
+            return (
+              <div key={plan} className={`rounded-xl border-2 p-5 ${plan === 'family' ? 'border-brand-300 bg-brand-50' : 'border-slate-200'}`}>
+                <p className="font-bold text-slate-900 text-lg">{info.name}</p>
+                <p className="text-2xl font-extrabold text-brand-600 mt-1">{info.price}</p>
+                <p className="text-xs text-slate-500 mb-4">{info.childLabel}</p>
+                <ul className="space-y-1.5 mb-5">
+                  {info.features.map((f) => (
+                    <li key={f} className="flex items-center gap-2 text-sm text-slate-700"><CheckCircle2 size={14} className="text-emerald-500 shrink-0" />{f}</li>
+                  ))}
+                </ul>
+                <button onClick={() => handle(plan)} disabled={!!loading} className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-brand-600 text-white font-semibold text-sm hover:bg-brand-700 disabled:opacity-50 transition">
+                  {loading === plan ? 'Redirecting…' : '14-day free trial →'}
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 // ============ TASK MODULE MODAL ============
@@ -926,13 +1011,23 @@ function FamilyHub({ onOpenParent }) {
   const [config] = useState({ timelines: { phase0: '2026-05-16', phase1: '2026-05-31', phase2: '2026-06-07', phase3: '2026-06-21', phase4: '2026-06-30' }, budgetMin: 50, budgetMax: 500 });
   const [activeChild, setActiveChild] = useState(null);
   const [pendingCount, setPendingCount] = useState(0);
-  const [showAddChild, setShowAddChild] = useState(false);
-  const [newChildName, setNewChildName] = useState('');
-  const [newChildAge, setNewChildAge]   = useState('');
-  const [newChildPin, setNewChildPin]   = useState('');
-  const [newCoachName, setNewCoachName] = useState('Claude');
-  const [addingChild, setAddingChild]   = useState(false);
+  const [showAddChild, setShowAddChild]     = useState(false);
+  const [showUpgradeGate, setShowUpgradeGate] = useState(false);
+  const [newChildName, setNewChildName]     = useState('');
+  const [newChildAge, setNewChildAge]       = useState('');
+  const [newChildPin, setNewChildPin]       = useState('');
+  const [newCoachName, setNewCoachName]     = useState('Claude');
+  const [addingChild, setAddingChild]       = useState(false);
   const lsKey = `kb_children_${session?.user?.id || 'demo'}`;
+
+  const planTier   = family?.plan_tier || 'free';
+  const childLimit = PLAN_LIMITS[planTier] ?? 1;
+  const atLimit    = children.length >= childLimit;
+
+  const handleAddChildClick = () => {
+    if (atLimit) setShowUpgradeGate(true);
+    else setShowAddChild(true);
+  };
 
   useEffect(() => {
     const famId = session?.user?.id || 'demo';
@@ -987,6 +1082,12 @@ function FamilyHub({ onOpenParent }) {
 
   return (
     <div className="min-h-screen bg-slate-50">
+      {showUpgradeGate && (
+        <UpgradeModal
+          reason={`The ${PLAN_INFO[planTier]?.name || 'Free'} plan supports ${childLimit} child${childLimit === 1 ? '' : 'ren'}. Upgrade to add more.`}
+          onClose={() => setShowUpgradeGate(false)}
+        />
+      )}
       {/* PIN modal */}
       {pinEntry && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-sm">
@@ -1024,7 +1125,7 @@ function FamilyHub({ onOpenParent }) {
             <p className="text-sm text-slate-500">{family?.email || 'Demo mode'}</p>
             <h1 className="text-3xl font-bold text-slate-900 tracking-tight mt-1">Who's working today?</h1>
           </div>
-          <button onClick={() => setShowAddChild(true)} className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-brand-600 text-white font-semibold text-sm hover:bg-brand-700 transition"><Plus size={16} /> Add child</button>
+          <button onClick={handleAddChildClick} className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-brand-600 text-white font-semibold text-sm hover:bg-brand-700 transition"><Plus size={16} /> Add child</button>
         </div>
 
         {showAddChild && (
@@ -1071,7 +1172,7 @@ function FamilyHub({ onOpenParent }) {
 
 // ============ PARENT CONSOLE ============
 function ParentConsole({ onBack }) {
-  const { session, signOut } = useAuth();
+  const { session, family, signOut } = useAuth();
   const [activeTab, setActiveTab] = useState('timeline');
   const [config, setConfig] = useState({ budgetMin: 50, budgetMax: 500, timelines: { phase0: '2026-05-16', phase1: '2026-05-31', phase2: '2026-06-07', phase3: '2026-06-21', phase4: '2026-06-30' }, integrations: { claude: false, googleDrive: false, n8n: false, obsidian: false } });
   const [budgetMin, setBudgetMin] = useState(50);
@@ -1132,6 +1233,31 @@ function ParentConsole({ onBack }) {
         </div>
       </header>
       <main className="max-w-5xl mx-auto px-6 py-10">
+        {/* Plan banner */}
+        {(() => {
+          const tier  = family?.plan_tier || 'free';
+          const info  = PLAN_INFO[tier];
+          const isPaid = tier !== 'free';
+          return (
+            <div className={`rounded-xl border p-4 mb-8 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 ${isPaid ? 'bg-brand-50 border-brand-200' : 'bg-white border-slate-200 shadow-card'}`}>
+              <div className="flex items-center gap-3">
+                <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-bold ${isPaid ? 'bg-brand-600 text-white' : 'bg-slate-200 text-slate-700'}`}>{info.name} Plan</span>
+                <p className="text-sm text-slate-600">{info.childLabel} · {isPaid ? info.price : 'Free forever'}</p>
+              </div>
+              <div className="flex gap-2">
+                {isPaid ? (
+                  <button onClick={openBillingPortal} className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg border border-brand-300 text-brand-700 font-semibold text-sm hover:bg-brand-100 transition">Manage billing</button>
+                ) : (
+                  <>
+                    <button onClick={() => startCheckout('family')} className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-brand-600 text-white font-semibold text-sm hover:bg-brand-700 transition">Family — $12/mo</button>
+                    <button onClick={() => startCheckout('class')}  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg border border-slate-300 text-slate-700 font-semibold text-sm hover:bg-slate-50 transition">Class — $29/mo</button>
+                  </>
+                )}
+              </div>
+            </div>
+          );
+        })()}
+
         <h1 className="text-3xl font-bold text-slate-900 tracking-tight mb-2">Settings</h1>
         <p className="text-slate-500 mb-8">Configure timelines, budgets, and integrations for your family.</p>
         <div className="border-b border-slate-200 mb-8 flex gap-1 overflow-x-auto">
