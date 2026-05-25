@@ -124,6 +124,68 @@ create policy "notifications: family only"
   using (family_id = auth.uid())
   with check (family_id = auth.uid());
 
+-- ── Usage logs (AI cost tracking) ────────────────────────────────────────
+-- One row per claude-chat API call. Used to track cost-per-user and enforce
+-- rate limits. call_type: 'chat' | 'artifact' | 'vision'
+create table if not exists usage_logs (
+  id            uuid primary key default gen_random_uuid(),
+  family_id     uuid not null references families on delete cascade,
+  child_id      uuid references children on delete set null,
+  business_id   uuid references businesses on delete set null,
+  task_id       text,
+  call_type     text not null default 'chat'
+                  check (call_type in ('chat','artifact','vision')),
+  input_tokens  int  not null default 0,
+  cached_tokens int  not null default 0,
+  output_tokens int  not null default 0,
+  cost_usd      numeric(10,6) not null default 0,
+  created_at    timestamptz not null default now()
+);
+
+alter table usage_logs enable row level security;
+
+-- Families can read their own usage (for showing stats in parent console)
+create policy "usage_logs: family read own"
+  on usage_logs for select
+  using (family_id = auth.uid());
+
+-- Only service role can insert (edge function uses service key)
+
+-- ── Family stats view (cost vs revenue per family) ────────────────────────
+-- Run: SELECT * FROM family_stats ORDER BY net_contribution_usd ASC
+-- to find families costing more than they're paying.
+create or replace view family_stats as
+select
+  f.id                                                    as family_id,
+  f.email,
+  f.plan_tier,
+  f.created_at,
+  case f.plan_tier
+    when 'family' then 12.00
+    when 'class'  then 29.00
+    else 0
+  end                                                     as monthly_revenue_usd,
+  coalesce(u.total_cost,     0)                           as lifetime_cost_usd,
+  coalesce(u.month_cost,     0)                           as month_cost_usd,
+  coalesce(u.total_messages, 0)                           as total_messages,
+  coalesce(u.month_messages, 0)                           as month_messages,
+  case f.plan_tier
+    when 'family' then 12.00 - coalesce(u.month_cost, 0)
+    when 'class'  then 29.00 - coalesce(u.month_cost, 0)
+    else               0     - coalesce(u.month_cost, 0)
+  end                                                     as net_contribution_usd
+from families f
+left join (
+  select
+    family_id,
+    sum(cost_usd)                                         as total_cost,
+    sum(case when created_at >= date_trunc('month', now()) then cost_usd  else 0 end) as month_cost,
+    count(*)                                              as total_messages,
+    count(case when created_at >= date_trunc('month', now()) then 1 end)              as month_messages
+  from usage_logs
+  group by family_id
+) u on u.family_id = f.id;
+
 -- ── Migration: add budget/launch_date to existing businesses ───
 -- Run this if you created the businesses table before this update:
 -- alter table businesses add column if not exists budget integer;

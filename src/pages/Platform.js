@@ -4,7 +4,7 @@ import {
   Eye, EyeOff, Calendar, DollarSign,
   Sparkles, GripVertical, Search, Target, Wrench, Palette,
   Mic, Package, BookOpen, BarChart3, Flag, ChevronRight,
-  X, CheckCircle2, Link as LinkIcon, Settings, ArrowLeft, Printer, Bell,
+  X, CheckCircle2, Link as LinkIcon, Settings, ArrowLeft, Printer, Bell, BarChart2,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { supabase, isConfigured } from '../lib/supabase';
@@ -294,6 +294,10 @@ function TaskModule({ task, phaseKey, child, businessId, familyId, onClose, onMa
                 offLimitsTopics: coachCfg.offLimitsTopics,
                 seedIdeas: task.id === 'op-spot' ? coachCfg.seedIdeas : '',
                 priorContext: getPriorTaskContext(businessId, task.id),
+                childId: child.id,
+                businessId,
+                taskId: task.id,
+                callType: 'chat',
               }),
             }
           );
@@ -558,6 +562,10 @@ function KidDashboard({ child, business, familyId, config, onBack }) {
                 taskIntro: `You are the ongoing coach for ${child.name}'s business "${business.name}". Answer questions, help them think through problems, and encourage them to keep making progress. Be personal and reference their specific business.`,
                 offLimitsTopics: coachCfg.offLimitsTopics,
                 priorContext: allTaskContext,
+                childId: child.id,
+                businessId: business.id,
+                taskId: null,
+                callType: 'chat',
               }),
             }
           );
@@ -1072,16 +1080,36 @@ function ParentConsole({ onBack }) {
   const [showApiKey, setShowApiKey] = useState(false);
   const [notifications, setNotifications] = useState([]);
   const [coachCfg, setCoachCfgState] = useState(() => getCoachConfig(session?.user?.id || 'demo'));
+  const [usageStats, setUsageStats]   = useState(null);
   const updateCoachCfg = (partial) => {
     const next = { ...coachCfg, ...partial };
     setCoachCfgState(next);
     saveCoachConfig(session?.user?.id || 'demo', next);
   };
-  const tabs = [{ id: 'timeline', label: 'Timeline', Icon: Calendar }, { id: 'budget', label: 'Budget', Icon: DollarSign }, { id: 'coach', label: 'AI Coach', Icon: Sparkles }, { id: 'integrations', label: 'Integrations', Icon: LinkIcon }, { id: 'requests', label: 'Requests', Icon: Bell }];
+  const tabs = [{ id: 'timeline', label: 'Timeline', Icon: Calendar }, { id: 'budget', label: 'Budget', Icon: DollarSign }, { id: 'coach', label: 'AI Coach', Icon: Sparkles }, { id: 'integrations', label: 'Integrations', Icon: LinkIcon }, { id: 'requests', label: 'Requests', Icon: Bell }, { id: 'usage', label: 'Usage', Icon: BarChart2 }];
 
   useEffect(() => {
     const famId = session?.user?.id || 'demo';
     setNotifications(getNotifications(famId));
+    // Load usage stats from Supabase
+    if (isConfigured && supabase && session) {
+      const monthStart = new Date(); monthStart.setDate(1); monthStart.setHours(0,0,0,0);
+      supabase
+        .from('usage_logs')
+        .select('cost_usd, input_tokens, cached_tokens, output_tokens, call_type, created_at')
+        .eq('family_id', famId)
+        .then(({ data }) => {
+          if (!data) return;
+          const month = data.filter(r => new Date(r.created_at) >= monthStart);
+          setUsageStats({
+            totalMessages:  data.length,
+            monthMessages:  month.length,
+            totalCost:      data.reduce((s, r) => s + parseFloat(r.cost_usd), 0),
+            monthCost:      month.reduce((s, r) => s + parseFloat(r.cost_usd), 0),
+            totalTokens:    data.reduce((s, r) => s + r.input_tokens + r.output_tokens, 0),
+          });
+        });
+    }
   }, [session]);
 
   const handleNotifAction = (id, status) => {
@@ -1227,6 +1255,43 @@ function ParentConsole({ onBack }) {
                   </div>
                 ))}
               </div>
+            )}
+          </section>
+        )}
+
+        {activeTab === 'usage' && (
+          <section className="space-y-5 max-w-2xl">
+            <div>
+              <h2 className="text-lg font-semibold text-slate-900 mb-1">Usage & cost</h2>
+              <p className="text-slate-500 text-sm">AI coaching usage for your account. Costs are based on Anthropic Haiku pricing.</p>
+            </div>
+            {!usageStats ? (
+              <div className="bg-white rounded-xl border border-slate-200 p-8 text-center shadow-card">
+                <p className="text-slate-400 text-sm">Loading usage data…</p>
+              </div>
+            ) : (
+              <>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  {[
+                    { label: 'This month — messages', value: usageStats.monthMessages.toLocaleString() },
+                    { label: 'This month — AI cost', value: `$${usageStats.monthCost.toFixed(4)}` },
+                    { label: 'All time — messages', value: usageStats.totalMessages.toLocaleString() },
+                    { label: 'All time — AI cost', value: `$${usageStats.totalCost.toFixed(4)}` },
+                  ].map(({ label, value }) => (
+                    <div key={label} className="bg-white rounded-xl border border-slate-200 p-4 shadow-card">
+                      <p className="text-xs text-slate-500 mb-1">{label}</p>
+                      <p className="text-xl font-bold text-slate-900">{value}</p>
+                    </div>
+                  ))}
+                </div>
+                <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-card">
+                  <h3 className="font-semibold text-slate-900 mb-3">Your plan</h3>
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-slate-600 capitalize">{session?.user ? 'See Stripe dashboard for subscription details' : 'Free plan'}</span>
+                  </div>
+                  <p className="text-xs text-slate-400 mt-3">Typical family completing the full program uses under $0.10 in AI credits total. Costs increase when image uploads and artifact generation are enabled.</p>
+                </div>
+              </>
             )}
           </section>
         )}

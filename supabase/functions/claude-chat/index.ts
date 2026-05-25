@@ -51,6 +51,10 @@ serve(async (req) => {
       offLimitsTopics,
       seedIdeas,
       priorContext,    // pre-trimmed on client; we hard-cap here too
+      childId,         // uuid — for usage logging
+      businessId,      // uuid — for usage logging
+      taskId,          // string — for usage logging
+      callType,        // 'chat' | 'artifact' | 'vision' — default 'chat'
     } = await req.json();
 
     // ── Trim message history to control input token cost ───────────────────
@@ -128,11 +132,35 @@ serve(async (req) => {
 
     const reply = result.content?.[0]?.text || 'Great answer! Keep going.';
 
-    // Log cache usage in dev so you can verify hits
-    const usage = result.usage;
-    if (usage) {
-      console.log(`Tokens — input: ${usage.input_tokens}, cached: ${usage.cache_read_input_tokens ?? 0}, output: ${usage.output_tokens}`);
-    }
+    // ── Cost calculation & usage logging ──────────────────────────────────
+    const usage = result.usage ?? {};
+    const inputTok   = usage.input_tokens ?? 0;
+    const cachedTok  = usage.cache_read_input_tokens ?? 0;
+    const cacheWrite = usage.cache_creation_input_tokens ?? 0;
+    const outputTok  = usage.output_tokens ?? 0;
+
+    // Haiku pricing (USD per token)
+    const PRICE = { input: 0.80e-6, output: 3.20e-6, cacheWrite: 1.00e-6, cacheRead: 0.08e-6 };
+    const costUsd =
+      inputTok   * PRICE.input  +
+      outputTok  * PRICE.output +
+      cacheWrite * PRICE.cacheWrite +
+      cachedTok  * PRICE.cacheRead;
+
+    console.log(`tokens in=${inputTok} cached=${cachedTok} cacheWrite=${cacheWrite} out=${outputTok} cost=$${costUsd.toFixed(6)}`);
+
+    // Fire-and-forget insert — don't let logging failure block the response
+    supabase.from('usage_logs').insert({
+      family_id:    user.id,
+      child_id:     childId    || null,
+      business_id:  businessId || null,
+      task_id:      taskId     || null,
+      call_type:    callType   || 'chat',
+      input_tokens:  inputTok,
+      cached_tokens: cachedTok,
+      output_tokens: outputTok,
+      cost_usd:      costUsd,
+    }).then(({ error }) => { if (error) console.error('usage_log insert:', error.message); });
 
     return new Response(JSON.stringify({ reply }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
