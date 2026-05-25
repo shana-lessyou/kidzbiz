@@ -51,10 +51,13 @@ serve(async (req) => {
       offLimitsTopics,
       seedIdeas,
       priorContext,    // pre-trimmed on client; we hard-cap here too
+      childConfig,     // { grade, accommodations, sensitivities, focusAreas, learningStyle, parentNotes }
+      businessNotes,   // parent injection notes for this specific business
       childId,         // uuid — for usage logging
       businessId,      // uuid — for usage logging
       taskId,          // string — for usage logging
       callType,        // 'chat' | 'artifact' | 'vision' — default 'chat'
+      summaryMode,     // boolean — if true, generate a parent-facing progress summary
     } = await req.json();
 
     // ── Trim message history to control input token cost ───────────────────
@@ -93,7 +96,62 @@ serve(async (req) => {
     if (trimmedPrior) {
       dynamicParts.push(`\nPRIOR TASK CONTEXT (use to give personalized advice — do not re-ask what's already been answered):\n${trimmedPrior}`);
     }
+    // ── Child coaching profile (set by parent) ─────────────────────────────
+    if (childConfig && (childConfig.grade || childConfig.accommodations || childConfig.sensitivities || childConfig.focusAreas || childConfig.learningStyle || childConfig.parentNotes)) {
+      const profileParts: string[] = [];
+      if (childConfig.grade)           profileParts.push(`Grade: ${childConfig.grade}`);
+      if (childConfig.learningStyle)   profileParts.push(`Learning style: ${childConfig.learningStyle}`);
+      if (childConfig.accommodations)  profileParts.push(`Accommodations/disabilities: ${childConfig.accommodations} — adjust your explanations accordingly`);
+      if (childConfig.sensitivities)   profileParts.push(`Sensitivities to avoid: ${childConfig.sensitivities}`);
+      if (childConfig.focusAreas)      profileParts.push(`Skills parent wants to develop: ${childConfig.focusAreas} — weave opportunities to build these naturally`);
+      if (childConfig.parentNotes)     profileParts.push(`Parent notes: ${childConfig.parentNotes}`);
+      dynamicParts.push(`\nCHILD PROFILE (set by parent — use to personalize your coaching):\n${profileParts.join('\n')}`);
+    }
+    // ── Business-specific parent notes ─────────────────────────────────────
+    if (businessNotes && businessNotes.trim()) {
+      dynamicParts.push(`\nPARENT NOTES FOR THIS BUSINESS: ${businessNotes.trim()}`);
+    }
     dynamicParts.push(`\nRespond in 2–4 sentences. End with one clear question. Never lecture.`);
+
+    // ── Summary mode — parent-facing progress report, bypasses kid prompt ──
+    if (summaryMode) {
+      const parentSystemPrompt = `You are a progress coach assistant writing clear, warm, and actionable progress summaries for parents of young entrepreneurs in a youth business education program.
+
+Write in plain English. Be specific, encouraging, and honest. Reference actual things the child said or did when possible.
+Keep the total response under 300 words. Use **bold** for section headers exactly as specified.`;
+
+      const summaryRes = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'x-api-key': ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: 'claude-haiku-4-5-20251001',
+          max_tokens: 600,
+          system: parentSystemPrompt,
+          messages: trimmedMessages.map((m) => ({ role: m.role, content: m.content })),
+        }),
+      });
+      const summaryResult = await summaryRes.json();
+      if (!summaryRes.ok) throw new Error(summaryResult.error?.message || 'Anthropic API error');
+      const reply = summaryResult.content?.[0]?.text || 'Unable to generate summary.';
+
+      // Log usage (fire-and-forget)
+      const u = summaryResult.usage ?? {};
+      const cost = (u.input_tokens ?? 0) * 0.80e-6 + (u.output_tokens ?? 0) * 3.20e-6;
+      supabase.from('usage_logs').insert({
+        family_id: user.id, child_id: childId || null, business_id: businessId || null,
+        task_id: null, call_type: 'chat',
+        input_tokens: u.input_tokens ?? 0, cached_tokens: 0,
+        output_tokens: u.output_tokens ?? 0, cost_usd: cost,
+      }).then(({ error }) => { if (error) console.error('usage_log insert:', error.message); });
+
+      return new Response(JSON.stringify({ reply }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
 
     // ── Anthropic API call with prompt caching ─────────────────────────────
     // The static SAFETY_PREAMBLE is marked for caching — saves ~97% on those

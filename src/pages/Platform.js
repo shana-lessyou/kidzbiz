@@ -195,6 +195,19 @@ function getCoachConfig(familyId) {
 }
 function saveCoachConfig(familyId, cfg) { localStorage.setItem(`kb_coach_${familyId}`, JSON.stringify(cfg)); }
 
+// Per-child coaching profile (stored by childId)
+const DEFAULT_CHILD_CONFIG = { grade: '', accommodations: '', sensitivities: '', focusAreas: '', learningStyle: '', parentNotes: '' };
+function getChildConfig(childId) {
+  try { return { ...DEFAULT_CHILD_CONFIG, ...JSON.parse(localStorage.getItem(`kb_child_cfg_${childId}`) || 'null') }; } catch { return DEFAULT_CHILD_CONFIG; }
+}
+function saveChildConfig(childId, cfg) { localStorage.setItem(`kb_child_cfg_${childId}`, JSON.stringify(cfg)); }
+
+// Per-business parent injection notes
+function getBizNotes(bizId) {
+  try { return localStorage.getItem(`kb_biz_notes_${bizId}`) || ''; } catch { return ''; }
+}
+function saveBizNotes(bizId, notes) { localStorage.setItem(`kb_biz_notes_${bizId}`, notes); }
+
 function getChatHistory(businessId, taskId) {
   try { return JSON.parse(localStorage.getItem(`kb_chat_${businessId}_${taskId}`) || 'null'); } catch { return null; }
 }
@@ -379,6 +392,8 @@ function TaskModule({ task, phaseKey, child, businessId, familyId, onClose, onMa
                 offLimitsTopics: coachCfg.offLimitsTopics,
                 seedIdeas: task.id === 'op-spot' ? coachCfg.seedIdeas : '',
                 priorContext: getPriorTaskContext(businessId, task.id),
+                childConfig: getChildConfig(child.id),
+                businessNotes: getBizNotes(businessId),
                 childId: child.id,
                 businessId,
                 taskId: task.id,
@@ -647,6 +662,8 @@ function KidDashboard({ child, business, familyId, config, onBack }) {
                 taskIntro: `You are the ongoing coach for ${child.name}'s business "${business.name}". Answer questions, help them think through problems, and encourage them to keep making progress. Be personal and reference their specific business.`,
                 offLimitsTopics: coachCfg.offLimitsTopics,
                 priorContext: allTaskContext,
+                childConfig: getChildConfig(child.id),
+                businessNotes: getBizNotes(business.id),
                 childId: child.id,
                 businessId: business.id,
                 taskId: null,
@@ -1193,12 +1210,79 @@ function ParentConsole({ onBack }) {
   const [usageStats, setUsageStats]         = useState(null);
   const [progressData, setProgressData]     = useState(null);
   const [loadingProgress, setLoadingProgress] = useState(false);
+  const [expandedProfiles, setExpandedProfiles] = useState({});  // childId → bool
+  const [expandedBizNotes, setExpandedBizNotes] = useState({});  // bizId → bool
+  const [childCfgDraft, setChildCfgDraft]   = useState({});      // childId → cfg obj
+  const [bizNotesDraft, setBizNotesDraft]   = useState({});      // bizId → string
+  const [summaries, setSummaries]           = useState({});      // bizId → { loading, text }
 
   const updateCoachCfg = (partial) => {
     const next = { ...coachCfg, ...partial };
     setCoachCfgState(next);
     saveCoachConfig(session?.user?.id || 'demo', next);
   };
+
+  const generateSummary = async (child, business) => {
+    setSummaries((prev) => ({ ...prev, [business.id]: { loading: true, text: null } }));
+    try {
+      if (!isConfigured || !supabase) {
+        setSummaries((prev) => ({ ...prev, [business.id]: { loading: false, text: 'Summary requires a Supabase connection.' } }));
+        return;
+      }
+      const { data: { session: authSession } } = await supabase.auth.getSession();
+      if (!authSession) return;
+
+      // Collect chat excerpts for every task in this business
+      const excerpts = Object.values(CURRICULUM_TASKS)
+        .flatMap((p) => p.tasks)
+        .map((t) => {
+          const history = getChatHistory(business.id, t.id);
+          if (!history) return null;
+          const userMsgs = history.filter((m) => m.role === 'user');
+          if (userMsgs.length === 0) return null;
+          const lastAsst = [...history].reverse().find((m) => m.role === 'assistant');
+          const kidLines = userMsgs.slice(0, 3).map((m) => `Kid: ${m.content.slice(0, 200)}`).join('\n');
+          const coachLine = lastAsst ? `Coach: ${lastAsst.content.slice(0, 200)}` : '';
+          return `[${t.title}]\n${kidLines}${coachLine ? '\n' + coachLine : ''}`;
+        })
+        .filter(Boolean)
+        .join('\n\n');
+
+      const childCfg = { ...DEFAULT_CHILD_CONFIG, ...(childCfgDraft[child.id] || getChildConfig(child.id)) };
+      const bizNotes = bizNotesDraft[business.id] ?? getBizNotes(business.id);
+
+      const summaryPrompt = `Write a warm, clear progress summary for the parents of ${child.name} (age ${child.age}${childCfg.grade ? `, grade ${childCfg.grade}` : ''}) about their business "${business.name}".${bizNotes ? `\n\nParent notes about this business: ${bizNotes}` : ''}${childCfg.accommodations ? `\nAccommodations / learning notes: ${childCfg.accommodations}` : ''}
+
+COACHING SESSION EXCERPTS:
+${excerpts || 'No coaching sessions have been completed yet for this business.'}
+
+Format your response with these sections (use bold headers):
+**📊 Progress Snapshot** — pace, overall status, how far along they are
+**⭐ Highlights** — 2–3 specific things they did well or showed insight on
+**💬 Memorable Moments** — something endearing, funny, or revealing they said (skip if nothing stands out)
+**⚠️ Observations** — any concerns, blockers, or patterns worth noting (omit section entirely if none)
+**💡 Parent Guidance** — 2–3 concrete things the parent can do to help right now
+
+Keep it under 300 words. Be honest but encouraging.`;
+
+      const res = await fetch(`${process.env.REACT_APP_SUPABASE_URL}/functions/v1/claude-chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authSession.access_token}` },
+        body: JSON.stringify({
+          messages: [{ role: 'user', content: summaryPrompt }],
+          childName: child.name, childAge: child.age, coachName: 'Coach',
+          taskTitle: '__PARENT_SUMMARY__',
+          childId: child.id, businessId: business.id, taskId: null, callType: 'chat',
+          summaryMode: true,
+        }),
+      });
+      const json = await res.json();
+      setSummaries((prev) => ({ ...prev, [business.id]: { loading: false, text: json.reply || 'Unable to generate summary. Please try again.' } }));
+    } catch (e) {
+      setSummaries((prev) => ({ ...prev, [business.id]: { loading: false, text: 'Error generating summary. Please try again.' } }));
+    }
+  };
+
   const tabs = [
     { id: 'progress',     label: 'Progress',     Icon: BarChart3   },
     { id: 'requests',     label: 'Requests',     Icon: Bell        },
@@ -1352,16 +1436,77 @@ function ParentConsole({ onBack }) {
               <div className="space-y-8">
                 {progressData.map(({ child, businesses }) => (
                   <div key={child.id}>
-                    {/* Child header */}
-                    <div className="flex items-center gap-3 mb-3">
-                      <div className="w-10 h-10 rounded-full bg-gradient-to-br from-brand-100 to-accent-100 text-brand-700 flex items-center justify-center font-bold text-lg ring-1 ring-brand-200">
-                        {child.name.charAt(0).toUpperCase()}
+                    {/* Child header + coaching profile toggle */}
+                    <div className="flex items-center justify-between mb-3">
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-full bg-gradient-to-br from-brand-100 to-accent-100 text-brand-700 flex items-center justify-center font-bold text-lg ring-1 ring-brand-200">
+                          {child.name.charAt(0).toUpperCase()}
+                        </div>
+                        <div>
+                          <p className="font-bold text-slate-900">{child.name}</p>
+                          <p className="text-xs text-slate-500">Age {child.age} · Coach: {child.coach_name}</p>
+                        </div>
                       </div>
-                      <div>
-                        <p className="font-bold text-slate-900">{child.name}</p>
-                        <p className="text-xs text-slate-500">Age {child.age} · Coach: {child.coach_name}</p>
-                      </div>
+                      <button
+                        onClick={() => setExpandedProfiles((prev) => ({ ...prev, [child.id]: !prev[child.id] }))}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 text-slate-600 text-xs font-semibold hover:bg-slate-50 transition"
+                      >
+                        <Settings size={12} />
+                        {expandedProfiles[child.id] ? 'Hide coaching profile' : 'Edit coaching profile'}
+                      </button>
                     </div>
+
+                    {/* Coaching profile form */}
+                    {expandedProfiles[child.id] && (() => {
+                      const cfg = childCfgDraft[child.id] ?? getChildConfig(child.id);
+                      const update = (field, value) => {
+                        const updated = { ...cfg, [field]: value };
+                        setChildCfgDraft((prev) => ({ ...prev, [child.id]: updated }));
+                        saveChildConfig(child.id, updated);
+                      };
+                      return (
+                        <div className="bg-sky-50 border border-sky-200 rounded-xl p-5 mb-4 space-y-4">
+                          <div className="flex items-center gap-2 mb-1">
+                            <Settings size={14} className="text-sky-600" />
+                            <p className="text-sm font-semibold text-sky-900">Coaching Profile — {child.name}</p>
+                          </div>
+                          <p className="text-xs text-sky-700 -mt-3">These details help the AI coach adapt its approach for {child.name}. Changes take effect on the next message.</p>
+                          <div className="grid sm:grid-cols-2 gap-3">
+                            <div>
+                              <label className="block text-xs font-semibold text-slate-600 mb-1">Grade level</label>
+                              <input type="text" value={cfg.grade} onChange={(e) => update('grade', e.target.value)} placeholder="e.g. 4th grade" className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 transition" />
+                            </div>
+                            <div>
+                              <label className="block text-xs font-semibold text-slate-600 mb-1">Learning style</label>
+                              <select value={cfg.learningStyle} onChange={(e) => update('learningStyle', e.target.value)} className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 transition bg-white">
+                                <option value="">Not specified</option>
+                                <option value="visual">Visual (diagrams, charts)</option>
+                                <option value="auditory">Auditory (talking it through)</option>
+                                <option value="reading">Reading / writing</option>
+                                <option value="kinesthetic">Kinesthetic / hands-on</option>
+                                <option value="mixed">Mixed</option>
+                              </select>
+                            </div>
+                            <div className="sm:col-span-2">
+                              <label className="block text-xs font-semibold text-slate-600 mb-1">Learning accommodations or disabilities</label>
+                              <input type="text" value={cfg.accommodations} onChange={(e) => update('accommodations', e.target.value)} placeholder="e.g. ADHD — short tasks, frequent encouragement; dyslexia — simple words" className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 transition" />
+                            </div>
+                            <div>
+                              <label className="block text-xs font-semibold text-slate-600 mb-1">Sensitivities to avoid</label>
+                              <input type="text" value={cfg.sensitivities} onChange={(e) => update('sensitivities', e.target.value)} placeholder="e.g. gets frustrated easily with math" className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 transition" />
+                            </div>
+                            <div>
+                              <label className="block text-xs font-semibold text-slate-600 mb-1">Skills to develop</label>
+                              <input type="text" value={cfg.focusAreas} onChange={(e) => update('focusAreas', e.target.value)} placeholder="e.g. confidence, math, public speaking" className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 transition" />
+                            </div>
+                            <div className="sm:col-span-2">
+                              <label className="block text-xs font-semibold text-slate-600 mb-1">Parent notes (general)</label>
+                              <textarea value={cfg.parentNotes} onChange={(e) => update('parentNotes', e.target.value)} placeholder="Anything else the coach should know about your child…" rows={2} className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 transition resize-none" />
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })()}
 
                     {businesses.length === 0 ? (
                       <div className="bg-white rounded-xl border border-dashed border-slate-300 p-6 text-center text-sm text-slate-400">
@@ -1445,6 +1590,57 @@ function ParentConsole({ onBack }) {
                                   )}
                                 </div>
                               )}
+
+                              {/* Parent notes for this business */}
+                              <div className="mt-4 pt-4 border-t border-slate-100">
+                                <div className="flex items-center justify-between mb-2">
+                                  <p className="text-xs font-semibold text-slate-500">Parent notes for AI coach</p>
+                                  <button
+                                    onClick={() => setExpandedBizNotes((prev) => ({ ...prev, [business.id]: !prev[business.id] }))}
+                                    className="text-xs text-brand-600 hover:underline"
+                                  >
+                                    {expandedBizNotes[business.id] ? 'Collapse' : (getBizNotes(business.id) ? 'Edit notes' : 'Add notes')}
+                                  </button>
+                                </div>
+                                {expandedBizNotes[business.id] ? (
+                                  <textarea
+                                    value={bizNotesDraft[business.id] ?? getBizNotes(business.id)}
+                                    onChange={(e) => {
+                                      setBizNotesDraft((prev) => ({ ...prev, [business.id]: e.target.value }));
+                                      saveBizNotes(business.id, e.target.value);
+                                    }}
+                                    placeholder={`e.g. He's been really excited about this. Encourage him to think about pricing. She mentioned wanting to donate some profits.`}
+                                    rows={2}
+                                    className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 transition resize-none"
+                                  />
+                                ) : (getBizNotes(business.id) || bizNotesDraft[business.id]) ? (
+                                  <p className="text-xs text-slate-500 italic truncate">{bizNotesDraft[business.id] ?? getBizNotes(business.id)}</p>
+                                ) : (
+                                  <p className="text-xs text-slate-400">None — tap "Add notes" to guide the AI coach for this business.</p>
+                                )}
+                              </div>
+
+                              {/* AI progress summary */}
+                              <div className="mt-3">
+                                {summaries[business.id]?.text ? (
+                                  <div className="bg-violet-50 border border-violet-200 rounded-xl p-4">
+                                    <div className="flex items-center justify-between mb-2">
+                                      <p className="text-xs font-semibold text-violet-800 flex items-center gap-1"><Sparkles size={12} /> AI Progress Summary</p>
+                                      <button onClick={() => generateSummary(child, business)} className="text-xs text-violet-600 hover:underline">Regenerate</button>
+                                    </div>
+                                    <p className="text-sm text-slate-700 whitespace-pre-wrap leading-relaxed">{summaries[business.id].text}</p>
+                                  </div>
+                                ) : (
+                                  <button
+                                    onClick={() => generateSummary(child, business)}
+                                    disabled={summaries[business.id]?.loading}
+                                    className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl border border-violet-300 text-violet-700 text-sm font-semibold hover:bg-violet-50 disabled:opacity-50 transition"
+                                  >
+                                    <Sparkles size={14} />
+                                    {summaries[business.id]?.loading ? 'Generating summary…' : 'Generate AI progress summary'}
+                                  </button>
+                                )}
+                              </div>
                             </div>
                           );
                         })}
