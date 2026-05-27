@@ -178,6 +178,20 @@ const PLAN_INFO = {
   class:  { name: 'Classroom',   price: '$29/mo',  childLabel: 'Up to 30 kids', features: ['Up to 30 children', 'Full curriculum', 'AI coach', 'Class management', '14-day free trial'], plan: 'class' },
 };
 
+// ── Send email notification via Edge Function (fire-and-forget) ──────────
+async function sendEmailNotification(payload) {
+  if (!isConfigured || !supabase) return;
+  try {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session) return;
+    fetch(`${process.env.REACT_APP_SUPABASE_URL}/functions/v1/send-notification`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
+      body: JSON.stringify(payload),
+    }).catch(() => {}); // truly fire-and-forget
+  } catch (_) {}
+}
+
 // ── Checkout helpers (used in FamilyHub & ParentConsole) ──────────────────
 async function getAccessToken() {
   if (!isConfigured || !supabase) return null;
@@ -352,6 +366,9 @@ function TaskModule({ task, phaseKey, child, businessId, familyId, onClose, onMa
   const [promptIndex, setPromptIndex] = useState(0);
   const [showDone, setShowDone]   = useState(false);
   const [listening, setListening] = useState(false);
+  const [showAskParent, setShowAskParent]   = useState(false);
+  const [askParentMsg, setAskParentMsg]     = useState('');
+  const [askParentSent, setAskParentSent]   = useState(false);
   const [ttsEnabled, setTtsEnabled]         = useState(() => getChildTtsEnabled(child.id));
   const [voices, setVoices]                 = useState([]);
   const [selectedVoiceName, setSelectedVoiceName] = useState(() => getChildVoiceName(child.id));
@@ -520,7 +537,73 @@ function TaskModule({ task, phaseKey, child, businessId, familyId, onClose, onMa
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-sm">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl h-[90vh] flex flex-col overflow-hidden">
+      <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-2xl h-[90vh] flex flex-col overflow-hidden">
+
+        {/* Ask-parent overlay — sits on top of the task modal */}
+        {showAskParent && (
+          <div className="absolute inset-0 z-10 flex items-center justify-center p-6 bg-slate-900/50 backdrop-blur-sm rounded-2xl">
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6">
+              <h2 className="font-bold text-slate-900 text-lg mb-1">Ask a parent</h2>
+              <p className="text-sm text-slate-500 mb-4">
+                During <strong>{task.title}</strong> — your parent will see this in Settings.
+              </p>
+              {askParentSent ? (
+                <div className="text-center py-4">
+                  <CheckCircle2 size={36} className="text-emerald-500 mx-auto mb-2" />
+                  <p className="font-semibold text-slate-900">Sent!</p>
+                  <p className="text-sm text-slate-500 mt-1">Keep going — your parent will check in soon.</p>
+                  <button
+                    onClick={() => { setShowAskParent(false); setAskParentSent(false); setAskParentMsg(''); }}
+                    className="mt-4 inline-flex items-center px-4 py-2.5 rounded-lg bg-brand-600 text-white font-semibold text-sm hover:bg-brand-700 transition"
+                  >
+                    Back to task
+                  </button>
+                </div>
+              ) : (
+                <>
+                  <textarea
+                    value={askParentMsg}
+                    onChange={(e) => setAskParentMsg(e.target.value)}
+                    placeholder={`e.g. Can you take me to the store to check prices? I need to finish the ${task.title} step.`}
+                    rows={3}
+                    autoFocus
+                    className="w-full px-3 py-2.5 rounded-lg border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 transition resize-none"
+                  />
+                  <div className="flex gap-2 mt-3">
+                    <button
+                      onClick={() => {
+                        const msg = askParentMsg.trim() || `Help needed on: ${task.title}`;
+                        addNotification(familyId, {
+                          childId: child.id, childName: child.name,
+                          businessId, businessName: '',
+                          taskId: task.id, taskTitle: task.title,
+                          message: msg,
+                        });
+                        sendEmailNotification({
+                          type: 'ask_parent',
+                          childName: child.name, childAge: child.age,
+                          taskTitle: task.title, message: msg,
+                        });
+                        setAskParentSent(true);
+                      }}
+                      disabled={!askParentMsg.trim()}
+                      className="flex-1 inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-lg bg-brand-600 text-white font-semibold text-sm hover:bg-brand-700 disabled:opacity-50 transition"
+                    >
+                      Send to parent
+                    </button>
+                    <button
+                      onClick={() => { setShowAskParent(false); setAskParentMsg(''); }}
+                      className="inline-flex items-center px-4 py-2 rounded-lg border border-slate-300 text-slate-600 text-sm hover:bg-slate-50 transition"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+
         <div className="px-5 py-4 border-b border-slate-100 flex items-start justify-between gap-3">
           <div className="flex items-start gap-3">
             <div className={`shrink-0 w-9 h-9 rounded-xl ring-1 ring-inset flex items-center justify-center ${meta.tint}`}><Icon size={18} /></div>
@@ -531,6 +614,9 @@ function TaskModule({ task, phaseKey, child, businessId, familyId, onClose, onMa
             </div>
           </div>
           <div className="flex items-center gap-1">
+            <button onClick={() => setShowAskParent(true)} title="Ask a parent for help" className="shrink-0 p-1.5 rounded-lg hover:bg-amber-50 text-slate-500 hover:text-amber-600 transition">
+              <Bell size={18} />
+            </button>
             {window.speechSynthesis && (
               <button onClick={toggleTts} title={ttsEnabled ? 'Mute coach voice' : 'Hear coach speak'} className={`shrink-0 p-1.5 rounded-lg transition ${ttsEnabled ? 'bg-brand-100 text-brand-700 hover:bg-brand-200' : 'hover:bg-slate-100 text-slate-500'}`}>
                 {ttsEnabled ? <Volume2 size={18} /> : <VolumeX size={18} />}
@@ -747,10 +833,16 @@ function KidDashboard({ child, business, familyId, config, onBack }) {
   const stopSidebarListening = () => { sidebarRecRef.current?.stop(); setSidebarListening(false); };
 
   const handleSendParentRequest = () => {
+    const msg = parentRequestMsg.trim();
     addNotification(familyId, {
       childId: child.id, childName: child.name,
       businessId: business.id, businessName: business.name,
-      message: parentRequestMsg.trim(),
+      message: msg,
+    });
+    sendEmailNotification({
+      type: 'ask_parent',
+      childName: child.name, childAge: child.age,
+      businessName: business.name, message: msg,
     });
     setRequestSent(true);
   };
@@ -798,7 +890,17 @@ function KidDashboard({ child, business, familyId, config, onBack }) {
     persistTaskStatus(business.id, familyId, taskId, phaseKey, newStatus);
   }, [business.id, familyId]);
 
-  const handleMarkDone  = (taskId, phaseKey) => updateTaskStatus(taskId, phaseKey, 'done');
+  const handleMarkDone  = (taskId, phaseKey) => {
+    updateTaskStatus(taskId, phaseKey, 'done');
+    // Find the task title for the notification
+    const taskObj = CURRICULUM_TASKS[phaseKey]?.tasks.find((t) => t.id === taskId);
+    sendEmailNotification({
+      type: 'task_done',
+      childName: child.name, childAge: child.age,
+      businessName: business.name,
+      taskTitle: taskObj?.title || taskId,
+    });
+  };
   const handleDragStart = (e, taskId, phase) => { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('taskId', taskId); e.dataTransfer.setData('phase', phase); };
   const handleDragOver  = (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; };
   const handleDrop      = (e, targetStatus) => {
@@ -1492,14 +1594,50 @@ Keep it under 300 words. Be honest but encouraging.`;
     }
   };
 
+  const [notifPrefs, setNotifPrefs]         = useState(null); // loaded from DB
+  const [notifSaving, setNotifSaving]       = useState(false);
+  const [notifSaved, setNotifSaved]         = useState(false);
+
+  // Load notification prefs when tab opens
+  useEffect(() => {
+    if (activeTab !== 'notifications' || notifPrefs || !isConfigured || !supabase || !session) return;
+    supabase.from('families')
+      .select('notify_email, notify_on_request, notify_on_task_done, notify_on_summary')
+      .eq('id', session.user.id)
+      .single()
+      .then(({ data }) => {
+        setNotifPrefs({
+          notify_email:        data?.notify_email        || session.user.email || '',
+          notify_on_request:   data?.notify_on_request   ?? true,
+          notify_on_task_done: data?.notify_on_task_done ?? false,
+          notify_on_summary:   data?.notify_on_summary   ?? false,
+        });
+      });
+  }, [activeTab, notifPrefs, session]);
+
+  const saveNotifPrefs = async () => {
+    if (!notifPrefs || !isConfigured || !supabase || !session) return;
+    setNotifSaving(true);
+    await supabase.from('families').update({
+      notify_email:        notifPrefs.notify_email,
+      notify_on_request:   notifPrefs.notify_on_request,
+      notify_on_task_done: notifPrefs.notify_on_task_done,
+      notify_on_summary:   notifPrefs.notify_on_summary,
+    }).eq('id', session.user.id);
+    setNotifSaving(false);
+    setNotifSaved(true);
+    setTimeout(() => setNotifSaved(false), 2500);
+  };
+
   const tabs = [
-    { id: 'progress',     label: 'Progress',     Icon: BarChart3   },
-    { id: 'requests',     label: 'Requests',     Icon: Bell        },
-    { id: 'coach',        label: 'AI Coach',     Icon: Sparkles    },
-    { id: 'timeline',     label: 'Timeline',     Icon: Calendar    },
-    { id: 'budget',       label: 'Budget',       Icon: DollarSign  },
-    { id: 'integrations', label: 'Integrations', Icon: LinkIcon    },
-    { id: 'usage',        label: 'Usage',        Icon: BarChart2   },
+    { id: 'progress',      label: 'Progress',      Icon: BarChart3   },
+    { id: 'requests',      label: 'Requests',       Icon: Bell        },
+    { id: 'notifications', label: 'Notifications',  Icon: Bell        },
+    { id: 'coach',         label: 'AI Coach',       Icon: Sparkles    },
+    { id: 'timeline',      label: 'Timeline',       Icon: Calendar    },
+    { id: 'budget',        label: 'Budget',         Icon: DollarSign  },
+    { id: 'integrations',  label: 'Integrations',   Icon: LinkIcon    },
+    { id: 'usage',         label: 'Usage',          Icon: BarChart2   },
   ];
 
   // Load progress data when the tab is shown
@@ -1978,6 +2116,95 @@ Keep it under 300 words. Be honest but encouraging.`;
                     )}
                   </div>
                 ))}
+              </div>
+            )}
+          </section>
+        )}
+
+        {activeTab === 'notifications' && (
+          <section className="space-y-5 max-w-lg">
+            <div>
+              <h2 className="text-lg font-semibold text-slate-900 mb-1">Email notifications</h2>
+              <p className="text-slate-500 text-sm">Get notified without having to open the app. We'll never spam — only the events you choose.</p>
+            </div>
+
+            {!notifPrefs ? (
+              <div className="bg-white rounded-xl border border-slate-200 p-8 text-center shadow-card">
+                <p className="text-slate-400 text-sm">Loading…</p>
+              </div>
+            ) : (
+              <div className="bg-white rounded-xl border border-slate-200 shadow-card divide-y divide-slate-100">
+
+                {/* Email address */}
+                <div className="p-5">
+                  <label className="block text-sm font-semibold text-slate-700 mb-2">Notification email</label>
+                  <input
+                    type="email"
+                    value={notifPrefs.notify_email}
+                    onChange={(e) => setNotifPrefs({ ...notifPrefs, notify_email: e.target.value })}
+                    placeholder="you@example.com"
+                    className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 transition"
+                  />
+                  <p className="text-xs text-slate-400 mt-1.5">We'll send notifications to this address.</p>
+                </div>
+
+                {/* Toggles */}
+                {[
+                  {
+                    key: 'notify_on_request',
+                    label: 'Child asks for help',
+                    desc: 'Email me when my child taps "Ask a parent" mid-task.',
+                    badge: 'Recommended',
+                  },
+                  {
+                    key: 'notify_on_task_done',
+                    label: 'Task completed',
+                    desc: 'Email me each time my child marks a task as done.',
+                    badge: null,
+                  },
+                  {
+                    key: 'notify_on_summary',
+                    label: 'Weekly AI progress summary',
+                    desc: 'Receive an AI-written summary of each child\'s progress once a week.',
+                    badge: null,
+                  },
+                ].map(({ key, label, desc, badge }) => (
+                  <div key={key} className="p-5 flex items-start justify-between gap-4">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-sm font-semibold text-slate-800">{label}</span>
+                        {badge && (
+                          <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-brand-100 text-brand-700">{badge}</span>
+                        )}
+                      </div>
+                      <p className="text-xs text-slate-500 mt-0.5">{desc}</p>
+                    </div>
+                    <button
+                      onClick={() => setNotifPrefs({ ...notifPrefs, [key]: !notifPrefs[key] })}
+                      role="switch"
+                      aria-checked={notifPrefs[key]}
+                      className={`relative inline-flex h-6 w-11 shrink-0 rounded-full transition ${notifPrefs[key] ? 'bg-brand-600' : 'bg-slate-300'}`}
+                    >
+                      <span className={`absolute top-0.5 ${notifPrefs[key] ? 'left-5' : 'left-0.5'} h-5 w-5 rounded-full bg-white shadow transition-all`} />
+                    </button>
+                  </div>
+                ))}
+
+                {/* Save button */}
+                <div className="p-5 flex items-center gap-3">
+                  <button
+                    onClick={saveNotifPrefs}
+                    disabled={notifSaving}
+                    className="px-5 py-2 rounded-lg bg-brand-600 text-white font-semibold text-sm hover:bg-brand-700 disabled:opacity-50 transition"
+                  >
+                    {notifSaving ? 'Saving…' : 'Save preferences'}
+                  </button>
+                  {notifSaved && (
+                    <span className="flex items-center gap-1.5 text-sm font-semibold text-emerald-600">
+                      <CheckCircle2 size={15} /> Saved!
+                    </span>
+                  )}
+                </div>
               </div>
             )}
           </section>
