@@ -1927,7 +1927,6 @@ Keep it under 300 words. Be honest but encouraging.`;
     { id: 'timeline',      label: 'Timeline',       Icon: Calendar    },
     { id: 'budget',        label: 'Budget',         Icon: DollarSign  },
     { id: 'integrations',  label: 'Integrations',   Icon: LinkIcon    },
-    { id: 'usage',         label: 'Usage',          Icon: BarChart2   },
   ];
 
   // Load progress data when the tab is shown
@@ -2580,43 +2579,6 @@ Keep it under 300 words. Be honest but encouraging.`;
                   )}
                 </div>
               </div>
-            )}
-          </section>
-        )}
-
-        {activeTab === 'usage' && (
-          <section className="space-y-5 max-w-2xl">
-            <div>
-              <h2 className="text-lg font-semibold text-slate-900 mb-1">Usage & cost</h2>
-              <p className="text-slate-500 text-sm">AI coaching usage for your account. Costs are based on Anthropic Haiku pricing.</p>
-            </div>
-            {!usageStats ? (
-              <div className="bg-white rounded-xl border border-slate-200 p-8 text-center shadow-card">
-                <p className="text-slate-400 text-sm">Loading usage data…</p>
-              </div>
-            ) : (
-              <>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                  {[
-                    { label: 'This month — messages', value: usageStats.monthMessages.toLocaleString() },
-                    { label: 'This month — AI cost', value: `$${usageStats.monthCost.toFixed(4)}` },
-                    { label: 'All time — messages', value: usageStats.totalMessages.toLocaleString() },
-                    { label: 'All time — AI cost', value: `$${usageStats.totalCost.toFixed(4)}` },
-                  ].map(({ label, value }) => (
-                    <div key={label} className="bg-white rounded-xl border border-slate-200 p-4 shadow-card">
-                      <p className="text-xs text-slate-500 mb-1">{label}</p>
-                      <p className="text-xl font-bold text-slate-900">{value}</p>
-                    </div>
-                  ))}
-                </div>
-                <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-card">
-                  <h3 className="font-semibold text-slate-900 mb-3">Your plan</h3>
-                  <div className="flex items-center justify-between text-sm">
-                    <span className="text-slate-600 capitalize">{session?.user ? 'See Stripe dashboard for subscription details' : 'Free plan'}</span>
-                  </div>
-                  <p className="text-xs text-slate-400 mt-3">Typical family completing the full program uses under $0.10 in AI credits total. Costs increase when image uploads and artifact generation are enabled.</p>
-                </div>
-              </>
             )}
           </section>
         )}
