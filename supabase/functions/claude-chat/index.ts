@@ -57,6 +57,7 @@ serve(async (req) => {
       businessId,      // uuid — for usage logging
       taskId,          // string — for usage logging
       callType,        // 'chat' | 'artifact' | 'vision' — default 'chat'
+      artifactType,    // 'price-check' | 'interview-sheet' | 'production-tracker' | 'business-plan'
       summaryMode,     // boolean — if true, generate a parent-facing progress summary
     } = await req.json();
 
@@ -114,6 +115,76 @@ serve(async (req) => {
     }
     dynamicParts.push(`\nRespond in 2–4 sentences. End with one clear question. Never lecture.`);
     dynamicParts.push(`\nHANDLING STUCK KIDS: If the child's reply is very short (under 10 words), vague ("I don't know", "idk", "not sure", "I can't think of anything", "help", "??"), or they seem frozen — immediately shift to suggestion mode. Do NOT ask another open-ended question. Instead: (1) offer 2–3 very specific concrete examples based on what you know about their business and situation so far, (2) make each option easy to react to with a simple yes/no or tweak, (3) end with "Does any of these feel right, or do you want a totally different direction?" — keep them moving, because momentum matters more than perfect answers at this stage.`);
+
+    // ── Artifact mode — generates printable HTML worksheets ───────────────
+    if (callType === 'artifact' && artifactType) {
+      const artifactInstructions: Record<string, string> = {
+        'price-check':
+          `Based on everything in this conversation, generate a printable price-check shopping worksheet as clean HTML.
+Include: a bold title "Price-Check Shopping Trip — ${taskTitle || 'Cost Breakdown'}" with ${childName}'s name; a short note to the parent like "Please take me here to check these prices!"; a clean table with columns ☐ | Item to Price | Where to Look (store/website) | Est. $ | Actual $ Found | Notes — pre-fill the items based on materials/ingredients/supplies mentioned; a signature line "Completed by: ___ Date: ___".
+Keep it to one page. Use clean inline styles for the table.`,
+
+        'interview-sheet':
+          `Based on this conversation about ${childName}'s business, generate a printable customer interview sheet as clean HTML.
+Include: bold title "Customer Interview Sheet"; Date / Interviewer Name / Interviewee Name fields at the top; 6–8 specific interview questions tailored to their type of business (write the actual questions, not generic ones); 3 blank lines after each question for notes; a box at the bottom labelled "Key insight from this interview:" and "Would this person buy? ☐ Yes  ☐ Maybe  ☐ No — because: ___".
+Use clean inline styles.`,
+
+        'production-tracker':
+          `Generate a printable batch production tracker as clean HTML for ${childName}'s business.
+Include: bold title "Production Tracker"; the business/product name; a table with columns: Batch # | Date | Units Made | Time (mins) | Quality Notes | What to Improve — with 10 empty rows; a summary section at the bottom: "Best batch so far: ___ Best output rate: ___ units/hour". Use clean inline styles.`,
+
+        'business-plan':
+          `Using ALL context from this conversation and any prior task context provided, generate a complete printable business plan document as clean HTML for ${childName}.
+Include these sections with REAL content filled in (not blank fields — use actual details from the conversation):
+1. Business Overview (name, what it is, the problem it solves)
+2. Product / Service (exactly what they're making or doing)
+3. Target Customers (who, why them, where to find them)
+4. Pricing Strategy (specific prices and the reasoning)
+5. Startup Costs (itemized list with amounts)
+6. Revenue Goal (first month / first 3 months)
+7. Marketing Plan (specific channels/tactics they'll use)
+8. Why This Will Succeed (their unique advantage)
+Format professionally but in a kid-friendly voice. Use section headers. End with: Prepared by: ${childName} | Date: ___`,
+      };
+
+      const instruction = artifactInstructions[artifactType];
+      if (!instruction) throw new Error(`Unknown artifactType: ${artifactType}`);
+
+      const artifactSystemPrompt = `You generate clean, printable HTML content for a youth entrepreneur program. Output ONLY the inner HTML body content — no <html>, <head>, <body>, or <style> tags. The caller wraps your output in a complete document with its own CSS. Use inline styles only for table/cell formatting. Write in plain HTML: headings, paragraphs, tables, lists. Be specific, kid-friendly, and fill in real details from the conversation.`;
+
+      const artifactRes = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: 'claude-haiku-4-5-20251001',
+          max_tokens: 1800,
+          system: artifactSystemPrompt,
+          messages: [
+            ...trimmedMessages.map((m) => ({ role: m.role, content: m.content })),
+            ...(trimmedPrior ? [{ role: 'user' as const, content: `[PRIOR TASK CONTEXT: ${trimmedPrior}]` }, { role: 'assistant' as const, content: 'Got it — I have the prior context.' }] : []),
+            { role: 'user' as const, content: instruction },
+          ],
+        }),
+      });
+
+      const artifactResult = await artifactRes.json();
+      if (!artifactRes.ok) throw new Error(artifactResult.error?.message || 'Anthropic API error');
+      const html = artifactResult.content?.[0]?.text || '<p>Unable to generate printable.</p>';
+
+      // Log usage (fire-and-forget)
+      const au = artifactResult.usage ?? {};
+      const aCost = (au.input_tokens ?? 0) * 0.80e-6 + (au.output_tokens ?? 0) * 3.20e-6;
+      supabase.from('usage_logs').insert({
+        family_id: user.id, child_id: childId || null, business_id: businessId || null,
+        task_id: taskId || null, call_type: 'artifact',
+        input_tokens: au.input_tokens ?? 0, cached_tokens: 0,
+        output_tokens: au.output_tokens ?? 0, cost_usd: aCost,
+      }).then(({ error }) => { if (error) console.error('usage_log insert:', error.message); });
+
+      return new Response(JSON.stringify({ html }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
 
     // ── Summary mode — parent-facing progress report, bypasses kid prompt ──
     if (summaryMode) {

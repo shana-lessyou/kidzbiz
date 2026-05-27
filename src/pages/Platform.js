@@ -5,7 +5,7 @@ import {
   Sparkles, GripVertical, Search, Target, Wrench, Palette,
   Mic, Package, BookOpen, BarChart3, Flag, ChevronRight,
   X, CheckCircle2, Link as LinkIcon, Settings, ArrowLeft, Printer, Bell, BarChart2,
-  Volume2, VolumeX,
+  Volume2, VolumeX, Lock, Unlock,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { supabase, isConfigured } from '../lib/supabase';
@@ -251,6 +251,16 @@ function getBizNotes(bizId) {
 }
 function saveBizNotes(bizId, notes) { localStorage.setItem(`kb_biz_notes_${bizId}`, notes); }
 
+// Pitch / funding gate helpers (stored per business in localStorage)
+const DEFAULT_PITCH_GATE = { gateType: 'none', budget: 50, criteria: '' };
+function getPitchGate(bizId) {
+  try { return { ...DEFAULT_PITCH_GATE, ...JSON.parse(localStorage.getItem(`kb_pitch_gate_${bizId}`) || 'null') }; }
+  catch { return DEFAULT_PITCH_GATE; }
+}
+function savePitchGate(bizId, cfg) { localStorage.setItem(`kb_pitch_gate_${bizId}`, JSON.stringify(cfg)); }
+function isPitchApproved(bizId) { return localStorage.getItem(`kb_pitch_approved_${bizId}`) === 'true'; }
+function setPitchApproved(bizId) { localStorage.setItem(`kb_pitch_approved_${bizId}`, 'true'); }
+
 function getChatHistory(businessId, taskId) {
   try { return JSON.parse(localStorage.getItem(`kb_chat_${businessId}_${taskId}`) || 'null'); } catch { return null; }
 }
@@ -373,8 +383,80 @@ function TaskModule({ task, phaseKey, child, businessId, familyId, onClose, onMa
   const [voices, setVoices]                 = useState([]);
   const [selectedVoiceName, setSelectedVoiceName] = useState(() => getChildVoiceName(child.id));
   const [speaking, setSpeaking]             = useState(false);
+  const [printing, setPrinting]             = useState(false);
+  const [pitchSent, setPitchSent]           = useState(false);
+  const pitchGate    = getPitchGate(businessId);
+  const isBizPlan    = task.id === 'biz-plan';
   const messagesEndRef = useRef(null);
   const recognitionRef = useRef(null);
+
+  // AI-generated printable artifacts — sends chat context to Claude, gets back printable HTML
+  const generatePrintable = async (artifactType) => {
+    if (!isConfigured || !supabase) return;
+    setPrinting(true);
+    try {
+      const { data: { session: authSession } } = await supabase.auth.getSession();
+      if (!authSession) return;
+      const res = await fetch(
+        `${process.env.REACT_APP_SUPABASE_URL}/functions/v1/claude-chat`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authSession.access_token}` },
+          body: JSON.stringify({
+            messages: messages.slice(-10).map((m) => ({ role: m.role, content: m.content })),
+            childName: child.name, childAge: child.age,
+            coachName: child.coachName,
+            taskTitle: task.title,
+            priorContext: getPriorTaskContext(businessId, task.id),
+            childId: child.id, businessId, taskId: task.id,
+            callType: 'artifact', artifactType,
+          }),
+        }
+      );
+      const json = await res.json();
+      if (json.html) {
+        const w = window.open('', '_blank');
+        w.document.write(`<!DOCTYPE html><html><head><title>${artifactType} — ${child.name}</title>
+<style>
+  @media print { body { margin: 0; } .no-print { display: none; } }
+  body { font-family: Georgia, serif; max-width: 680px; margin: 32px auto; font-size: 14px; line-height: 1.65; color: #1e293b; }
+  h1, h2, h3 { font-family: sans-serif; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { border: 1px solid #cbd5e1; padding: 8px 10px; text-align: left; }
+  th { background: #f1f5f9; font-weight: 700; font-size: 13px; }
+  @page { margin: 0.8in; }
+</style>
+</head><body>${json.html}
+<div class="no-print" style="margin-top:32px;text-align:center">
+  <button onclick="window.print()" style="background:#4F46E5;color:#fff;font-weight:700;padding:10px 28px;border:none;border-radius:8px;font-size:14px;cursor:pointer">🖨️ Print</button>
+</div>
+</body></html>`);
+        w.document.close();
+        setTimeout(() => w.print(), 400);
+      }
+    } catch (_) {}
+    finally { setPrinting(false); }
+  };
+
+  // Pitch submission — sends pitch notification to parent
+  const handleSubmitPitch = () => {
+    const gateLabel = { informal: 'Informal pitch', written: 'Written business plan', shark_tank: 'Shark Tank pitch' }[pitchGate.gateType] || 'Pitch';
+    const msg = `${child.name} has submitted their ${gateLabel} and is ready for your review! Budget requested: $${pitchGate.budget}.${pitchGate.criteria ? ` Your criteria: "${pitchGate.criteria}"` : ''}`;
+    addNotification(familyId, {
+      childId: child.id, childName: child.name,
+      businessId, businessName: '',
+      taskId: task.id, taskTitle: task.title,
+      message: msg,
+      isPitch: true, pitchBudget: pitchGate.budget,
+    });
+    sendEmailNotification({
+      type: 'ask_parent',
+      childName: child.name, childAge: child.age,
+      taskTitle: `${gateLabel} — ready for review`,
+      message: msg,
+    });
+    setPitchSent(true);
+  };
 
   // Load browser TTS voices (async on some browsers)
   useEffect(() => {
@@ -689,17 +771,100 @@ function TaskModule({ task, phaseKey, child, businessId, familyId, onClose, onMa
           <div ref={messagesEndRef} />
         </div>
         <div className="border-t border-slate-100 p-4 space-y-2">
-          {task.id === 'cost-breakdown' && messages.length > 2 && (
-            <div className="flex gap-2">
-              <button onClick={() => {
-                const items = messages.filter((m) => m.role === 'user').map((m) => `<li>${m.content}</li>`).join('');
-                const w = window.open('', '_blank');
-                w.document.write(`<!DOCTYPE html><html><head><title>Supply List — ${child.name}</title><style>body{font-family:sans-serif;max-width:500px;margin:40px auto;font-size:14px}li{margin:8px 0}</style></head><body><h2>Supply List</h2><p><em>${child.name}'s notes from Cost Breakdown</em></p><ul>${items}</ul></body></html>`);
-                w.document.close(); w.print();
-              }} className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border border-slate-300 text-slate-700 text-xs font-semibold hover:bg-slate-50 transition"><Printer size={14} /> Print supply list</button>
-              {coachCfg.amazonLinks && (
-                <button onClick={() => window.open(`https://www.amazon.com/s?k=${encodeURIComponent(child.name + ' craft supplies')}`, '_blank')} className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border border-slate-300 text-slate-700 text-xs font-semibold hover:bg-slate-50 transition"><Search size={14} /> Search Amazon</button>
+          {/* Task-specific printable helpers — appear once the kid has some context */}
+          {messages.filter((m) => m.role === 'user').length >= 2 && (
+            <div className="flex flex-wrap gap-2">
+              {task.id === 'cost-breakdown' && (
+                <button
+                  onClick={() => isConfigured && supabase ? generatePrintable('price-check') : (() => {
+                    const items = messages.filter((m) => m.role === 'user').map((m) => `<li>${m.content}</li>`).join('');
+                    const w = window.open('', '_blank');
+                    w.document.write(`<!DOCTYPE html><html><head><title>Price Check — ${child.name}</title><style>body{font-family:sans-serif;max-width:500px;margin:40px auto;font-size:14px}li{margin:8px 0}</style></head><body><h2>Price Check List</h2><p><em>${child.name}'s notes</em></p><ul>${items}</ul></body></html>`);
+                    w.document.close(); w.print();
+                  })()}
+                  disabled={printing}
+                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-slate-300 text-slate-700 text-xs font-semibold hover:bg-slate-50 disabled:opacity-50 transition"
+                >
+                  <Printer size={14} /> {printing ? 'Generating…' : 'Print price-check list'}
+                </button>
               )}
+              {task.id === 'interviews' && (
+                <button
+                  onClick={() => generatePrintable('interview-sheet')}
+                  disabled={printing || !isConfigured}
+                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-slate-300 text-slate-700 text-xs font-semibold hover:bg-slate-50 disabled:opacity-50 transition"
+                >
+                  <Printer size={14} /> {printing ? 'Generating…' : 'Print interview sheet'}
+                </button>
+              )}
+              {task.id === 'production-ramp' && (
+                <button
+                  onClick={() => generatePrintable('production-tracker')}
+                  disabled={printing || !isConfigured}
+                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-slate-300 text-slate-700 text-xs font-semibold hover:bg-slate-50 disabled:opacity-50 transition"
+                >
+                  <Printer size={14} /> {printing ? 'Generating…' : 'Print production tracker'}
+                </button>
+              )}
+              {isBizPlan && (
+                <button
+                  onClick={() => generatePrintable('business-plan')}
+                  disabled={printing || !isConfigured}
+                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-violet-300 text-violet-700 text-xs font-semibold hover:bg-violet-50 disabled:opacity-50 transition"
+                >
+                  <Printer size={14} /> {printing ? 'Generating…' : 'Print business plan'}
+                </button>
+              )}
+              {coachCfg.amazonLinks && task.id === 'cost-breakdown' && (
+                <button onClick={() => window.open(`https://www.amazon.com/s?k=${encodeURIComponent(child.name + ' craft supplies')}`, '_blank')} className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-slate-300 text-slate-700 text-xs font-semibold hover:bg-slate-50 transition"><Search size={14} /> Search Amazon</button>
+              )}
+            </div>
+          )}
+          {/* Shark Tank pitch gate — submit button for biz-plan when parent has set a gate */}
+          {isBizPlan && pitchGate.gateType !== 'none' && !isPitchApproved(businessId) && messages.filter((m) => m.role === 'user').length >= 3 && (
+            <div className={`rounded-xl border p-4 ${pitchSent ? 'border-emerald-200 bg-emerald-50' : 'border-amber-200 bg-amber-50'}`}>
+              {pitchSent ? (
+                <div className="flex items-center gap-2 text-emerald-700">
+                  <CheckCircle2 size={16} />
+                  <div>
+                    <p className="font-semibold text-sm">Pitch submitted!</p>
+                    <p className="text-xs mt-0.5">Your parent will review it and approve your funding. Keep working in the meantime!</p>
+                  </div>
+                </div>
+              ) : (
+                <div>
+                  <p className="text-xs font-semibold text-amber-800 mb-1 flex items-center gap-1.5">
+                    <Lock size={12} /> Funding locked — parent review required
+                  </p>
+                  <p className="text-xs text-amber-700 mb-3">
+                    Your parent wants you to submit a{' '}
+                    <strong>{{ informal: 'verbal pitch summary', written: 'written business plan', shark_tank: 'Shark Tank-style pitch' }[pitchGate.gateType]}</strong>{' '}
+                    before releasing your ${pitchGate.budget} budget.
+                  </p>
+                  <div className="flex gap-2">
+                    {isBizPlan && (
+                      <button
+                        onClick={() => generatePrintable('business-plan')}
+                        disabled={printing || !isConfigured}
+                        className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-amber-300 text-amber-800 text-xs font-semibold hover:bg-amber-100 disabled:opacity-50 transition"
+                      >
+                        <Printer size={12} /> {printing ? 'Generating…' : 'Preview plan first'}
+                      </button>
+                    )}
+                    <button
+                      onClick={handleSubmitPitch}
+                      className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-amber-600 text-white text-xs font-semibold hover:bg-amber-700 transition"
+                    >
+                      🦈 Submit pitch to parents
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+          {isPitchApproved(businessId) && isBizPlan && (
+            <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs font-semibold">
+              <Unlock size={13} /> Parent approved — ${pitchGate.budget} funding unlocked! 🎉
             </div>
           )}
           {showDone && (
@@ -1315,6 +1480,18 @@ function BusinessHub({ child, familyId, config, onBack }) {
                     <div className="flex justify-between text-xs text-slate-500 mb-1"><span>{done}/{total} tasks done</span><span>{pct}%</span></div>
                     <div className="w-full h-1.5 bg-slate-100 rounded-full overflow-hidden"><div className="h-full bg-brand-500 rounded-full" style={{ width: `${Math.max(2, pct)}%` }} /></div>
                   </div>
+                  {/* Funding gate status */}
+                  {(() => {
+                    const gate = getPitchGate(biz.id);
+                    if (gate.gateType === 'none') return null;
+                    const approved = isPitchApproved(biz.id);
+                    return (
+                      <div className={`mt-2 flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-full w-fit ${approved ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
+                        {approved ? <Unlock size={11} /> : <Lock size={11} />}
+                        {approved ? `$${gate.budget} unlocked!` : `Pitch required for $${gate.budget}`}
+                      </div>
+                    );
+                  })()}
                   <button onClick={() => setActiveBiz(biz)} className="mt-4 w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border border-slate-200 text-slate-700 font-semibold text-sm hover:border-brand-300 hover:bg-brand-50/50 transition group-hover:border-brand-300">
                     Open dashboard <ChevronRight size={14} />
                   </button>
@@ -1525,6 +1702,7 @@ function ParentConsole({ onBack }) {
   const [expandedBizNotes, setExpandedBizNotes] = useState({});  // bizId → bool
   const [childCfgDraft, setChildCfgDraft]   = useState({});      // childId → cfg obj
   const [bizNotesDraft, setBizNotesDraft]   = useState({});      // bizId → string
+  const [pitchGateDraft, setPitchGateDraft] = useState({});      // bizId → gate cfg
   const [summaries, setSummaries]           = useState({});      // bizId → { loading, text }
 
   const updateCoachCfg = (partial) => {
@@ -1967,6 +2145,65 @@ Keep it under 300 words. Be honest but encouraging.`;
                                 )}
                               </div>
 
+                              {/* Funding gate config */}
+                              {(() => {
+                                const gate = pitchGateDraft[business.id] ?? getPitchGate(business.id);
+                                const approved = isPitchApproved(business.id);
+                                const updateGate = (field, value) => {
+                                  const updated = { ...gate, [field]: value };
+                                  setPitchGateDraft((prev) => ({ ...prev, [business.id]: updated }));
+                                  savePitchGate(business.id, updated);
+                                };
+                                return (
+                                  <div className="mt-3 pt-3 border-t border-slate-100">
+                                    <div className="flex items-center justify-between mb-2">
+                                      <p className="text-xs font-semibold text-slate-500 flex items-center gap-1.5">
+                                        {approved ? <Unlock size={11} className="text-emerald-500" /> : <Lock size={11} className="text-amber-500" />}
+                                        Funding gate
+                                      </p>
+                                      {approved && (
+                                        <span className="text-xs font-semibold text-emerald-600 flex items-center gap-1"><CheckCircle2 size={11} /> Approved!</span>
+                                      )}
+                                    </div>
+                                    <div className="space-y-2">
+                                      <div className="flex items-center gap-2">
+                                        <select
+                                          value={gate.gateType}
+                                          onChange={(e) => updateGate('gateType', e.target.value)}
+                                          className="flex-1 px-2.5 py-1.5 rounded-lg border border-slate-300 text-xs bg-white focus:outline-none focus:ring-2 focus:ring-brand-500 transition"
+                                        >
+                                          <option value="none">No gate — just give the money</option>
+                                          <option value="informal">Informal pitch — kid explains verbally</option>
+                                          <option value="written">Written business plan — submitted via app</option>
+                                          <option value="shark_tank">Full Shark Tank — formal pitch presentation</option>
+                                        </select>
+                                        {gate.gateType !== 'none' && (
+                                          <div className="relative shrink-0 w-24">
+                                            <DollarSign size={12} className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-400" />
+                                            <input
+                                              type="number"
+                                              value={gate.budget}
+                                              onChange={(e) => updateGate('budget', parseInt(e.target.value) || 0)}
+                                              className="w-full pl-6 pr-2 py-1.5 rounded-lg border border-slate-300 text-xs focus:outline-none focus:ring-2 focus:ring-brand-500 transition"
+                                              placeholder="50"
+                                            />
+                                          </div>
+                                        )}
+                                      </div>
+                                      {gate.gateType !== 'none' && (
+                                        <input
+                                          type="text"
+                                          value={gate.criteria}
+                                          onChange={(e) => updateGate('criteria', e.target.value)}
+                                          placeholder="Evaluation criteria (optional, e.g. 'must show at least 3 customer interviews')"
+                                          className="w-full px-2.5 py-1.5 rounded-lg border border-slate-300 text-xs focus:outline-none focus:ring-2 focus:ring-brand-500 transition"
+                                        />
+                                      )}
+                                    </div>
+                                  </div>
+                                );
+                              })()}
+
                               {/* AI progress summary */}
                               <div className="mt-3">
                                 {summaries[business.id]?.text ? (
@@ -2100,16 +2337,41 @@ Keep it under 300 words. Be honest but encouraging.`;
             ) : (
               <div className="space-y-3">
                 {[...notifications].reverse().map((n) => (
-                  <div key={n.id} className={`bg-white rounded-xl border p-4 shadow-card flex items-start justify-between gap-4 ${n.status === 'pending' ? 'border-amber-200' : 'border-slate-200 opacity-60'}`}>
-                    <div>
-                      <p className="font-semibold text-slate-900">{n.childName} — <span className="text-slate-500 font-normal">{n.businessName}</span></p>
+                  <div key={n.id} className={`bg-white rounded-xl border p-4 shadow-card flex items-start justify-between gap-4 ${
+                    n.status === 'pending' ? (n.isPitch ? 'border-violet-300' : 'border-amber-200') : 'border-slate-200 opacity-60'
+                  }`}>
+                    <div className="flex-1 min-w-0">
+                      {n.isPitch && (
+                        <p className="text-xs font-bold text-violet-700 uppercase tracking-wide mb-1 flex items-center gap-1">🦈 Shark Tank pitch submission</p>
+                      )}
+                      <p className="font-semibold text-slate-900">{n.childName}{n.taskTitle ? <span className="text-slate-500 font-normal"> — {n.taskTitle}</span> : ''}</p>
                       <p className="text-sm text-slate-700 mt-1">{n.message}</p>
+                      {n.isPitch && n.pitchBudget && (
+                        <p className="text-xs font-semibold text-violet-700 mt-1 flex items-center gap-1"><DollarSign size={11} /> Budget requested: ${n.pitchBudget}</p>
+                      )}
                       <p className="text-xs text-slate-400 mt-1">{new Date(n.created_at).toLocaleDateString()}</p>
                     </div>
                     {n.status === 'pending' ? (
-                      <div className="flex gap-2 shrink-0">
-                        <button onClick={() => handleNotifAction(n.id, 'approved')} className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white font-semibold text-xs hover:bg-emerald-700 transition">Approve</button>
-                        <button onClick={() => handleNotifAction(n.id, 'denied')} className="px-3 py-1.5 rounded-lg border border-slate-300 text-slate-600 font-semibold text-xs hover:bg-slate-50 transition">Deny</button>
+                      <div className="flex flex-col gap-2 shrink-0">
+                        {n.isPitch ? (
+                          <>
+                            <button
+                              onClick={() => {
+                                if (n.businessId) setPitchApproved(n.businessId);
+                                handleNotifAction(n.id, 'approved');
+                              }}
+                              className="px-3 py-1.5 rounded-lg bg-violet-600 text-white font-semibold text-xs hover:bg-violet-700 transition"
+                            >
+                              Approve & unlock ${n.pitchBudget || ''}
+                            </button>
+                            <button onClick={() => handleNotifAction(n.id, 'denied')} className="px-3 py-1.5 rounded-lg border border-slate-300 text-slate-600 font-semibold text-xs hover:bg-slate-50 transition">Not yet</button>
+                          </>
+                        ) : (
+                          <>
+                            <button onClick={() => handleNotifAction(n.id, 'approved')} className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white font-semibold text-xs hover:bg-emerald-700 transition">Approve</button>
+                            <button onClick={() => handleNotifAction(n.id, 'denied')} className="px-3 py-1.5 rounded-lg border border-slate-300 text-slate-600 font-semibold text-xs hover:bg-slate-50 transition">Deny</button>
+                          </>
+                        )}
                       </div>
                     ) : (
                       <span className={`shrink-0 text-xs font-semibold px-2.5 py-1 rounded-full ${n.status === 'approved' ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>{n.status}</span>
