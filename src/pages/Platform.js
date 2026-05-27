@@ -385,6 +385,7 @@ function TaskModule({ task, phaseKey, child, businessId, familyId, onClose, onMa
   const [speaking, setSpeaking]             = useState(false);
   const [printing, setPrinting]             = useState(false);
   const [pitchSent, setPitchSent]           = useState(false);
+  const [priorCheck, setPriorCheck]         = useState(null); // null | 'loading' | { status, summary }
   const pitchGate    = getPitchGate(businessId);
   const isBizPlan    = task.id === 'biz-plan';
   const messagesEndRef = useRef(null);
@@ -511,6 +512,45 @@ function TaskModule({ task, phaseKey, child, businessId, familyId, onClose, onMa
 
   // Persist chat after every exchange
   useEffect(() => { saveChatHistory(businessId, task.id, messages); }, [messages, businessId, task.id]);
+
+  // Prior-work check — fires once on mount when task has no prior chat but has prior context
+  // Asks Claude if the task appears to already be resolved from prior task conversations.
+  useEffect(() => {
+    if (!isConfigured || !supabase || hasUserMsg || !priorCtx || task.id === 'op-spot') return;
+    let cancelled = false;
+    const runCheck = async () => {
+      setPriorCheck('loading');
+      try {
+        const { data: { session: authSession } } = await supabase.auth.getSession();
+        if (!authSession || cancelled) return;
+        const res = await fetch(
+          `${process.env.REACT_APP_SUPABASE_URL}/functions/v1/claude-chat`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authSession.access_token}` },
+            body: JSON.stringify({
+              messages: [],
+              childName: child.name, childAge: child.age,
+              taskTitle: task.title,
+              priorContext: priorCtx,
+              childId: child.id, businessId, taskId: task.id,
+              callType: 'task-check',
+            }),
+          }
+        );
+        const json = await res.json();
+        if (!cancelled && json.assessment && json.assessment.status !== 'unclear') {
+          setPriorCheck(json.assessment);
+        } else if (!cancelled) {
+          setPriorCheck(null);
+        }
+      } catch (_) {
+        if (!cancelled) setPriorCheck(null);
+      }
+    };
+    runCheck();
+    return () => { cancelled = true; };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const startListening = () => {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -729,6 +769,49 @@ function TaskModule({ task, phaseKey, child, businessId, familyId, onClose, onMa
                 <Volume2 size={12} /> Speaking…
               </span>
             )}
+          </div>
+        )}
+
+        {/* Prior-work check banner — appears when Claude detects the task was already done */}
+        {priorCheck && priorCheck !== 'loading' && (
+          <div className={`px-5 py-3 border-b flex items-start gap-3 ${
+            priorCheck.status === 'done'
+              ? 'bg-emerald-50 border-emerald-100'
+              : 'bg-amber-50 border-amber-100'
+          }`}>
+            <CheckCircle2
+              size={16}
+              className={`shrink-0 mt-0.5 ${priorCheck.status === 'done' ? 'text-emerald-600' : 'text-amber-500'}`}
+            />
+            <div className="flex-1 min-w-0">
+              <p className={`text-xs font-bold mb-0.5 ${priorCheck.status === 'done' ? 'text-emerald-800' : 'text-amber-800'}`}>
+                {priorCheck.status === 'done'
+                  ? 'Looks like you already finished this! 🎉'
+                  : "You've already started this one"}
+              </p>
+              <p className={`text-xs leading-relaxed ${priorCheck.status === 'done' ? 'text-emerald-700' : 'text-amber-700'}`}>
+                {priorCheck.summary}
+              </p>
+              {priorCheck.status === 'done' && (
+                <p className="text-xs text-emerald-600 mt-1">
+                  Does that still hold? If so, just mark it done — no need to redo the whole thing.
+                </p>
+              )}
+            </div>
+            {priorCheck.status === 'done' && (
+              <button
+                onClick={() => { onMarkDone(task.id, phaseKey); onClose(); }}
+                className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-xs font-bold hover:bg-emerald-700 transition whitespace-nowrap"
+              >
+                <CheckCircle2 size={12} /> Mark done
+              </button>
+            )}
+          </div>
+        )}
+        {priorCheck === 'loading' && (
+          <div className="px-5 py-2.5 border-b border-slate-100 bg-slate-50 flex items-center gap-2">
+            <div className="w-3.5 h-3.5 rounded-full border-2 border-brand-400 border-t-transparent animate-spin shrink-0" />
+            <p className="text-xs text-slate-400">Checking your prior work…</p>
           </div>
         )}
 

@@ -116,6 +116,55 @@ serve(async (req) => {
     dynamicParts.push(`\nRespond in 2–4 sentences. End with one clear question. Never lecture.`);
     dynamicParts.push(`\nHANDLING STUCK KIDS: If the child's reply is very short (under 10 words), vague ("I don't know", "idk", "not sure", "I can't think of anything", "help", "??"), or they seem frozen — immediately shift to suggestion mode. Do NOT ask another open-ended question. Instead: (1) offer 2–3 very specific concrete examples based on what you know about their business and situation so far, (2) make each option easy to react to with a simple yes/no or tweak, (3) end with "Does any of these feel right, or do you want a totally different direction?" — keep them moving, because momentum matters more than perfect answers at this stage.`);
 
+    // ── Task-check mode — lightweight prior-work assessment ──────────────
+    // Returns { status: 'done'|'partial'|'unclear', summary: string }
+    // Called when a task opens for the first time and prior context exists.
+    if (callType === 'task-check') {
+      if (!trimmedPrior) {
+        return new Response(JSON.stringify({ assessment: { status: 'unclear', summary: '' } }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
+      const checkRes = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: 'claude-haiku-4-5-20251001',
+          max_tokens: 140,
+          system: `You assess whether a curriculum task has already been completed based on prior conversation context. Respond ONLY with valid JSON — no prose, no markdown — in exactly this format: {"status":"done"|"partial"|"unclear","summary":"1-2 plain English sentences describing what was decided or done, written directly to the kid (e.g. 'You decided to sell lemonade solo.')"}. "done" = the task objective was clearly resolved. "partial" = some but not all of it was addressed. "unclear" = nothing relevant found.`,
+          messages: [{
+            role: 'user',
+            content: `Task: "${taskTitle}"\n\nPrior context from ${childName}'s other task conversations:\n${trimmedPrior}\n\nWas "${taskTitle}" already resolved in this context?`,
+          }],
+        }),
+      });
+
+      const checkResult = await checkRes.json();
+      if (!checkRes.ok) {
+        return new Response(JSON.stringify({ assessment: { status: 'unclear', summary: '' } }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      const rawText = checkResult.content?.[0]?.text?.trim() || '{}';
+      let assessment = { status: 'unclear', summary: '' };
+      try { assessment = JSON.parse(rawText); } catch (_) { /* leave as unclear */ }
+
+      // Log usage (fire-and-forget, very small)
+      const cu = checkResult.usage ?? {};
+      const cCost = (cu.input_tokens ?? 0) * 0.80e-6 + (cu.output_tokens ?? 0) * 3.20e-6;
+      supabase.from('usage_logs').insert({
+        family_id: user.id, child_id: childId || null, business_id: businessId || null,
+        task_id: taskId || null, call_type: 'task-check',
+        input_tokens: cu.input_tokens ?? 0, cached_tokens: 0,
+        output_tokens: cu.output_tokens ?? 0, cost_usd: cCost,
+      }).then(({ error }) => { if (error) console.error('usage_log insert:', error.message); });
+
+      return new Response(JSON.stringify({ assessment }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
     // ── Artifact mode — generates printable HTML worksheets ───────────────
     if (callType === 'artifact' && artifactType) {
       const artifactInstructions: Record<string, string> = {
