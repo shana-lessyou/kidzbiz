@@ -82,6 +82,7 @@ serve(async (req) => {
     } else {
       dynamicParts.push(`\nCURRENT TASK: "${taskTitle}"\n${taskIntro || ''}`);
       dynamicParts.push(`\nSCOPE RULES: Stay focused on THIS task only. Once the task objective is achieved, briefly summarize what was decided and tell the kid they can mark it done. Do NOT drift into other phases, marketing, future steps, or adjacent topics — those have their own tasks.`);
+      dynamicParts.push(`\nPRIOR-WORK CHECK: Scan the prior task context. If the work for THIS task appears to have already been resolved in a previous conversation (e.g. the kid already committed to a partner decision, already named their product, already set a price), say so immediately at the start of your first reply. Confirm what was decided, ask if it still holds, and tell them they can mark this task done without re-doing the whole conversation. If nothing relevant is in prior context, proceed normally.`);
     }
 
     if (childAge && childAge <= 11) {
@@ -112,6 +113,7 @@ serve(async (req) => {
       dynamicParts.push(`\nPARENT NOTES FOR THIS BUSINESS: ${businessNotes.trim()}`);
     }
     dynamicParts.push(`\nRespond in 2–4 sentences. End with one clear question. Never lecture.`);
+    dynamicParts.push(`\nHANDLING STUCK KIDS: If the child's reply is very short (under 10 words), vague ("I don't know", "idk", "not sure", "I can't think of anything", "help", "??"), or they seem frozen — immediately shift to suggestion mode. Do NOT ask another open-ended question. Instead: (1) offer 2–3 very specific concrete examples based on what you know about their business and situation so far, (2) make each option easy to react to with a simple yes/no or tweak, (3) end with "Does any of these feel right, or do you want a totally different direction?" — keep them moving, because momentum matters more than perfect answers at this stage.`);
 
     // ── Summary mode — parent-facing progress report, bypasses kid prompt ──
     if (summaryMode) {

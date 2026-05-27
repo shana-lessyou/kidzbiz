@@ -90,6 +90,28 @@ const TASK_MODULES = {
   'fair-execution': { headline: 'Craft Fair Day', intro: `This is what all five phases have been building toward.`, parentHelp: 'You will need a parent to help transport your booth, inventory, and supplies to the event — and ideally to be there on the day.', coachOpener: `Fair day is almost here!\n\nFinal readiness check: (1) all inventory, (2) payment method, (3) booth supplies, (4) sign. What's the status of each?`, guidePrompts: [`What time do you arrive to set up? How are you getting there with all your stuff?`, `Who's helping at the booth? What's their job?`, `What's your goal for the day — units sold, profit amount, or something else?`, `After the fair: write down everything — units sold, what people said, what you'd do differently.`, `How do you feel? Whatever the result — you built a real business. That makes you an entrepreneur.`], doneMessage: `You did it. Whatever the result, completing this program puts you in a very small group of kids who actually built and sold something real. Mark done and celebrate!` },
 };
 
+// ── Suggestion chips shown to kids when they might be stuck ───────────────
+// Sentence-starters the kid can tap to pre-fill the input. Shown for the
+// first 5 user messages so they're always handy early in a conversation.
+const STUCK_SUGGESTIONS = {
+  'op-spot':         ["I already have an idea — I want to…", "I have a craft fair coming up", "I don't have an idea yet"],
+  'part-decision':   ["I want to go solo", "I have a friend who might partner", "I'm not sure — help me think through it"],
+  'idea-worksheet':  ["My product is…", "My customer would be…", "I'm stuck on what problem I solve"],
+  'interviews':      ["I could ask my neighbors", "I know some parents I could interview", "I don't know who to talk to"],
+  'market-gap':      ["The problem I found is…", "Customers said they wished…", "I'm not sure what the gap is"],
+  'product-pitches': ["My first idea is…", "I could make or sell…", "I need help thinking of ideas"],
+  'cost-breakdown':  ["I need supplies like…", "I'm not sure what things cost", "My main materials are…"],
+  'pricing-strategy':["Similar things sell for about…", "I'm not sure what to charge", "I think the right price is…"],
+  'revenue-forecast':["I think I could sell about ___ units", "I'm not sure how many I'd sell", "My low estimate is…"],
+  'biz-plan':        ["My business summary is…", "I'm stuck on the market section", "Here's what I have so far:"],
+  'prototype':       ["I made my first batch and…", "I'm not sure how to start making it", "My test result was…"],
+  'feedback-log':    ["The first person I showed said…", "People liked…", "I haven't shown it to anyone yet"],
+  'production-ramp': ["I can make about ___ per session", "I'm worried about running out of time", "My plan is…"],
+  'booth-design':    ["I want my booth to look…", "I'm not sure where to start", "I was thinking of using…"],
+  'sales-pitch':     ["Here's my pitch attempt:", "I get nervous when someone asks…", "I'm not sure how to start"],
+  'fair-execution':  ["Everything is ready except…", "My goal for the fair is…", "I'm nervous about…"],
+};
+
 // ============ SHARED COMPONENTS ============
 function Logo({ size = 'md' }) {
   const s = { sm: { box: 'w-8 h-8', icon: 16, text: 'text-base' }, md: { box: 'w-10 h-10', icon: 20, text: 'text-xl' }, lg: { box: 'w-12 h-12', icon: 24, text: 'text-2xl' } }[size];
@@ -506,6 +528,25 @@ function TaskModule({ task, phaseKey, child, businessId, familyId, onClose, onMa
               <CheckCircle2 size={18} /> Mark as done — move to Done column
             </button>
           )}
+          {/* Suggestion chips — shown for first 5 user messages so kids have starters handy */}
+          {(() => {
+            const userMsgCount = messages.filter((m) => m.role === 'user').length;
+            const chips = STUCK_SUGGESTIONS[task.id] || [];
+            if (userMsgCount >= 5 || chips.length === 0 || loading) return null;
+            return (
+              <div className="flex gap-2 overflow-x-auto pb-0.5 -mb-0.5" style={{ scrollbarWidth: 'none' }}>
+                {chips.map((chip) => (
+                  <button
+                    key={chip}
+                    onClick={() => { setInput(chip); }}
+                    className="shrink-0 inline-flex items-center px-3 py-1.5 rounded-full border border-slate-200 bg-white text-slate-500 text-xs font-medium hover:border-brand-300 hover:bg-brand-50 hover:text-brand-700 transition"
+                  >
+                    {chip}
+                  </button>
+                ))}
+              </div>
+            );
+          })()}
           <div className="flex gap-2">
             <input type="text" placeholder={listening ? '🎤 Listening…' : `Answer ${child.coachName}…`} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && handleSend()} disabled={loading} className="flex-1 px-3.5 py-2.5 rounded-lg border border-slate-300 bg-white text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-brand-500 transition text-sm" />
             {(window.SpeechRecognition || window.webkitSpeechRecognition) && (
