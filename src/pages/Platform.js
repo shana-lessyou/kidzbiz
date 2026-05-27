@@ -5,6 +5,7 @@ import {
   Sparkles, GripVertical, Search, Target, Wrench, Palette,
   Mic, Package, BookOpen, BarChart3, Flag, ChevronRight,
   X, CheckCircle2, Link as LinkIcon, Settings, ArrowLeft, Printer, Bell, BarChart2,
+  Volume2, VolumeX,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { supabase, isConfigured } from '../lib/supabase';
@@ -224,6 +225,12 @@ function getChildConfig(childId) {
 }
 function saveChildConfig(childId, cfg) { localStorage.setItem(`kb_child_cfg_${childId}`, JSON.stringify(cfg)); }
 
+// Per-child TTS (text-to-speech) preferences
+function getChildTtsEnabled(childId) { return localStorage.getItem(`kb_tts_on_${childId}`) === 'true'; }
+function saveChildTtsEnabled(childId, v) { localStorage.setItem(`kb_tts_on_${childId}`, String(v)); }
+function getChildVoiceName(childId) { return localStorage.getItem(`kb_tts_voice_${childId}`) || ''; }
+function saveChildVoiceName(childId, name) { localStorage.setItem(`kb_tts_voice_${childId}`, name); }
+
 // Per-business parent injection notes
 function getBizNotes(bizId) {
   try { return localStorage.getItem(`kb_biz_notes_${bizId}`) || ''; } catch { return ''; }
@@ -345,8 +352,63 @@ function TaskModule({ task, phaseKey, child, businessId, familyId, onClose, onMa
   const [promptIndex, setPromptIndex] = useState(0);
   const [showDone, setShowDone]   = useState(false);
   const [listening, setListening] = useState(false);
+  const [ttsEnabled, setTtsEnabled]         = useState(() => getChildTtsEnabled(child.id));
+  const [voices, setVoices]                 = useState([]);
+  const [selectedVoiceName, setSelectedVoiceName] = useState(() => getChildVoiceName(child.id));
+  const [speaking, setSpeaking]             = useState(false);
   const messagesEndRef = useRef(null);
   const recognitionRef = useRef(null);
+
+  // Load browser TTS voices (async on some browsers)
+  useEffect(() => {
+    const synth = window.speechSynthesis;
+    if (!synth) return;
+    const load = () => {
+      const en = synth.getVoices().filter((v) => v.lang.startsWith('en'));
+      setVoices(en);
+      setSelectedVoiceName((prev) => {
+        if (prev && en.find((v) => v.name === prev)) return prev; // keep saved preference
+        const def = en.find((v) => v.default) || en[0];
+        if (def) { saveChildVoiceName(child.id, def.name); return def.name; }
+        return prev;
+      });
+    };
+    load();
+    synth.addEventListener('voiceschanged', load);
+    return () => { synth.removeEventListener('voiceschanged', load); synth.cancel(); };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const toggleTts = () => {
+    const next = !ttsEnabled;
+    setTtsEnabled(next);
+    saveChildTtsEnabled(child.id, next);
+    if (!next) window.speechSynthesis?.cancel();
+  };
+  const changeVoice = (name) => {
+    setSelectedVoiceName(name);
+    saveChildVoiceName(child.id, name);
+    // Auto-preview so the kid can hear the voice immediately
+    const synth = window.speechSynthesis;
+    if (!synth) return;
+    synth.cancel();
+    const u = new SpeechSynthesisUtterance(`Hi ${child.name}! Ready to build your business?`);
+    const v = voices.find((vv) => vv.name === name);
+    if (v) u.voice = v;
+    u.rate = 0.88;
+    synth.speak(u);
+  };
+  const speakReply = (text) => {
+    const synth = window.speechSynthesis;
+    if (!synth || !ttsEnabled) return;
+    synth.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    const v = voices.find((vv) => vv.name === selectedVoiceName) || voices[0];
+    if (v) u.voice = v;
+    u.rate = 0.88;
+    u.onstart = () => setSpeaking(true);
+    u.onend   = () => setSpeaking(false);
+    synth.speak(u);
+  };
 
   // Persist chat after every exchange
   useEffect(() => { saveChatHistory(businessId, task.id, messages); }, [messages, businessId, task.id]);
@@ -384,6 +446,7 @@ function TaskModule({ task, phaseKey, child, businessId, familyId, onClose, onMa
 
   const handleSend = async () => {
     if (!input.trim()) return;
+    window.speechSynthesis?.cancel(); // stop any ongoing coach speech when kid sends
     const userMsg = { id: Date.now(), role: 'user', content: input };
     const nextMessages = [...messages, userMsg];
     setMessages(nextMessages);
@@ -451,6 +514,7 @@ function TaskModule({ task, phaseKey, child, businessId, familyId, onClose, onMa
     setTimeout(() => {
       setMessages((p) => [...p, { id: Date.now() + 1, role: 'assistant', content: reply }]);
       setLoading(false);
+      if (reply) speakReply(reply);
     }, reply === null ? 0 : 200);
   };
 
@@ -467,10 +531,39 @@ function TaskModule({ task, phaseKey, child, businessId, familyId, onClose, onMa
             </div>
           </div>
           <div className="flex items-center gap-1">
+            {window.speechSynthesis && (
+              <button onClick={toggleTts} title={ttsEnabled ? 'Mute coach voice' : 'Hear coach speak'} className={`shrink-0 p-1.5 rounded-lg transition ${ttsEnabled ? 'bg-brand-100 text-brand-700 hover:bg-brand-200' : 'hover:bg-slate-100 text-slate-500'}`}>
+                {ttsEnabled ? <Volume2 size={18} /> : <VolumeX size={18} />}
+              </button>
+            )}
             <button onClick={handlePrint} title="Print worksheet" className="shrink-0 p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 transition"><Printer size={18} /></button>
             <button onClick={onClose} className="shrink-0 p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 transition"><X size={18} /></button>
           </div>
         </div>
+
+        {/* Voice picker — shown when TTS is on */}
+        {ttsEnabled && voices.length > 0 && (
+          <div className="px-5 py-2 border-b border-slate-100 bg-slate-50 flex items-center gap-3">
+            <span className="text-xs text-slate-500 font-medium shrink-0 flex items-center gap-1.5">
+              <Volume2 size={12} /> Voice:
+            </span>
+            <select
+              value={selectedVoiceName}
+              onChange={(e) => changeVoice(e.target.value)}
+              className="flex-1 min-w-0 text-xs px-2 py-1.5 rounded-lg border border-slate-200 bg-white focus:outline-none focus:ring-1 focus:ring-brand-500 transition"
+            >
+              {voices.map((v) => (
+                <option key={v.name} value={v.name}>{v.name}</option>
+              ))}
+            </select>
+            {speaking && (
+              <span className="text-xs text-brand-600 font-semibold shrink-0 flex items-center gap-1 animate-pulse">
+                <Volume2 size={12} /> Speaking…
+              </span>
+            )}
+          </div>
+        )}
+
         {guidePrompts.length > 0 && (
           <div className="px-5 py-2 border-b border-slate-50 flex items-center gap-1.5">
             <p className="text-xs text-slate-400 mr-1">Step</p>
@@ -582,8 +675,62 @@ function KidDashboard({ child, business, familyId, config, onBack }) {
   const [parentRequestMsg, setParentRequestMsg]   = useState('');
   const [requestSent, setRequestSent]             = useState(false);
   const [sidebarListening, setSidebarListening]   = useState(false);
+  const [sideTts, setSideTts]                     = useState(() => getChildTtsEnabled(child.id));
+  const [sideVoices, setSideVoices]               = useState([]);
+  const [sideVoiceName, setSideVoiceName]         = useState(() => getChildVoiceName(child.id));
+  const [sideSpeaking, setSideSpeaking]           = useState(false);
   const messagesEndRef    = useRef(null);
   const sidebarRecRef     = useRef(null);
+
+  // Load TTS voices for sidebar
+  useEffect(() => {
+    const synth = window.speechSynthesis;
+    if (!synth) return;
+    const load = () => {
+      const en = synth.getVoices().filter((v) => v.lang.startsWith('en'));
+      setSideVoices(en);
+      setSideVoiceName((prev) => {
+        if (prev && en.find((v) => v.name === prev)) return prev;
+        const def = en.find((v) => v.default) || en[0];
+        if (def) { saveChildVoiceName(child.id, def.name); return def.name; }
+        return prev;
+      });
+    };
+    load();
+    synth.addEventListener('voiceschanged', load);
+    return () => { synth.removeEventListener('voiceschanged', load); synth.cancel(); };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const toggleSideTts = () => {
+    const next = !sideTts;
+    setSideTts(next);
+    saveChildTtsEnabled(child.id, next);
+    if (!next) window.speechSynthesis?.cancel();
+  };
+  const changeSideVoice = (name) => {
+    setSideVoiceName(name);
+    saveChildVoiceName(child.id, name);
+    const synth = window.speechSynthesis;
+    if (!synth) return;
+    synth.cancel();
+    const u = new SpeechSynthesisUtterance(`Hi ${child.name}! Ask me anything.`);
+    const v = sideVoices.find((vv) => vv.name === name);
+    if (v) u.voice = v;
+    u.rate = 0.88;
+    synth.speak(u);
+  };
+  const speakSideReply = (text) => {
+    const synth = window.speechSynthesis;
+    if (!synth || !sideTts) return;
+    synth.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    const v = sideVoices.find((vv) => vv.name === sideVoiceName) || sideVoices[0];
+    if (v) u.voice = v;
+    u.rate = 0.88;
+    u.onstart = () => setSideSpeaking(true);
+    u.onend   = () => setSideSpeaking(false);
+    synth.speak(u);
+  };
 
   const startSidebarListening = () => {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -663,6 +810,7 @@ function KidDashboard({ child, business, familyId, config, onBack }) {
 
   const handleSendMessage = async () => {
     if (!input.trim()) return;
+    window.speechSynthesis?.cancel();
     const userMsg = { id: Date.now(), role: 'user', content: input };
     const nextMessages = [...messages, userMsg];
     setMessages(nextMessages);
@@ -723,6 +871,7 @@ function KidDashboard({ child, business, familyId, config, onBack }) {
     }
     setMessages((p) => [...p, { id: Date.now() + 1, role: 'assistant', content: reply }]);
     setLoading(false);
+    if (reply) speakSideReply(reply);
   };
 
   const currentPhase = CURRICULUM_TASKS[activePhase];
@@ -869,11 +1018,30 @@ function KidDashboard({ child, business, familyId, config, onBack }) {
         {/* Coach chat */}
         <div className="bg-white rounded-xl border border-slate-200 overflow-hidden flex flex-col h-80 shadow-card">
           <div className="px-4 py-3 border-b border-slate-100 flex items-center gap-2">
-            <div className="w-8 h-8 rounded-full bg-accent-100 text-accent-700 flex items-center justify-center"><MessageCircle size={16} /></div>
-            <div>
+            <div className="w-8 h-8 rounded-full bg-accent-100 text-accent-700 flex items-center justify-center shrink-0"><MessageCircle size={16} /></div>
+            <div className="flex-1 min-w-0">
               <p className="font-semibold text-slate-900 leading-tight">Ask {child.coachName} anything</p>
-              <p className="text-xs text-slate-500">General questions, brainstorming, quick advice</p>
+              {sideTts && sideVoices.length > 0 ? (
+                <div className="flex items-center gap-1.5 mt-0.5">
+                  <Volume2 size={10} className="text-brand-500 shrink-0" />
+                  <select
+                    value={sideVoiceName}
+                    onChange={(e) => changeSideVoice(e.target.value)}
+                    className="text-xs px-1.5 py-0.5 rounded border border-slate-200 bg-white focus:outline-none focus:ring-1 focus:ring-brand-500 transition w-full"
+                  >
+                    {sideVoices.map((v) => <option key={v.name} value={v.name}>{v.name}</option>)}
+                  </select>
+                  {sideSpeaking && <span className="text-[10px] text-brand-600 font-semibold shrink-0 animate-pulse">Speaking…</span>}
+                </div>
+              ) : (
+                <p className="text-xs text-slate-500">General questions, brainstorming, quick advice</p>
+              )}
             </div>
+            {window.speechSynthesis && (
+              <button onClick={toggleSideTts} title={sideTts ? 'Mute coach voice' : 'Hear coach speak'} className={`shrink-0 p-1.5 rounded-lg transition ${sideTts ? 'bg-brand-100 text-brand-700 hover:bg-brand-200' : 'hover:bg-slate-100 text-slate-500'}`}>
+                {sideTts ? <Volume2 size={15} /> : <VolumeX size={15} />}
+              </button>
+            )}
           </div>
           <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-slate-50/50">
             {messages.map((msg) => (
