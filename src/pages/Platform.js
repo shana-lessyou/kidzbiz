@@ -251,6 +251,11 @@ function getBizNotes(bizId) {
 }
 function saveBizNotes(bizId, notes) { localStorage.setItem(`kb_biz_notes_${bizId}`, notes); }
 
+// iOS detection — Chrome on iPhone is WebKit and blocks async speechSynthesis.speak()
+const isIOSDevice = () =>
+  /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+  (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
 // Pitch / funding gate helpers (stored per business in localStorage)
 const DEFAULT_PITCH_GATE = { gateType: 'none', budget: 50, criteria: '' };
 function getPitchGate(bizId) {
@@ -386,8 +391,10 @@ function TaskModule({ task, phaseKey, child, businessId, familyId, onClose, onMa
   const [printing, setPrinting]             = useState(false);
   const [pitchSent, setPitchSent]           = useState(false);
   const [priorCheck, setPriorCheck]         = useState(null); // null | 'loading' | { status, summary }
-  const pitchGate    = getPitchGate(businessId);
-  const isBizPlan    = task.id === 'biz-plan';
+  const [speakingMsgId, setSpeakingMsgId]   = useState(null);
+  const isIOS     = isIOSDevice();
+  const pitchGate = getPitchGate(businessId);
+  const isBizPlan = task.id === 'biz-plan';
   const messagesEndRef = useRef(null);
   const recognitionRef = useRef(null);
 
@@ -497,7 +504,7 @@ function TaskModule({ task, phaseKey, child, businessId, familyId, onClose, onMa
     u.rate = 0.88;
     synth.speak(u);
   };
-  const speakReply = (text) => {
+  const speakReply = (text, msgId = null) => {
     const synth = window.speechSynthesis;
     if (!synth || !ttsEnabled) return;
     synth.cancel();
@@ -505,8 +512,9 @@ function TaskModule({ task, phaseKey, child, businessId, familyId, onClose, onMa
     const v = voices.find((vv) => vv.name === selectedVoiceName) || voices[0];
     if (v) u.voice = v;
     u.rate = 0.88;
-    u.onstart = () => setSpeaking(true);
-    u.onend   = () => setSpeaking(false);
+    u.onstart = () => { setSpeaking(true); setSpeakingMsgId(msgId); };
+    u.onend   = () => { setSpeaking(false); setSpeakingMsgId(null); };
+    u.onerror  = () => { setSpeaking(false); setSpeakingMsgId(null); };
     synth.speak(u);
   };
 
@@ -651,9 +659,11 @@ function TaskModule({ task, phaseKey, child, businessId, familyId, onClose, onMa
     }
 
     setTimeout(() => {
-      setMessages((p) => [...p, { id: Date.now() + 1, role: 'assistant', content: reply }]);
+      const newMsgId = Date.now() + 1;
+      setMessages((p) => [...p, { id: newMsgId, role: 'assistant', content: reply }]);
       setLoading(false);
-      if (reply) speakReply(reply);
+      // iOS blocks speak() from async callbacks — iOS users use the per-message tap button instead
+      if (reply && !isIOS) speakReply(reply, newMsgId);
     }, reply === null ? 0 : 200);
   };
 
@@ -764,11 +774,13 @@ function TaskModule({ task, phaseKey, child, businessId, familyId, onClose, onMa
                 <option key={v.name} value={v.name}>{v.name}</option>
               ))}
             </select>
-            {speaking && (
+            {isIOS ? (
+              <span className="text-xs text-slate-400 shrink-0">Tap "Hear" on any message</span>
+            ) : speaking ? (
               <span className="text-xs text-brand-600 font-semibold shrink-0 flex items-center gap-1 animate-pulse">
                 <Volume2 size={12} /> Speaking…
               </span>
-            )}
+            ) : null}
           </div>
         )}
 
@@ -840,8 +852,25 @@ function TaskModule({ task, phaseKey, child, businessId, familyId, onClose, onMa
           {messages.map((msg) => (
             <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
               {msg.role === 'assistant' && <div className="w-7 h-7 rounded-full bg-accent-100 text-accent-700 flex items-center justify-center shrink-0 mr-2 mt-0.5"><MessageCircle size={14} /></div>}
-              <div className={`max-w-md rounded-2xl px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap ${msg.role === 'user' ? 'bg-brand-600 text-white rounded-br-sm' : 'bg-white text-slate-800 rounded-bl-sm border border-slate-200 shadow-card'}`}>
-                {msg.content}
+              <div className="flex flex-col items-start max-w-md">
+                <div className={`rounded-2xl px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap w-full ${msg.role === 'user' ? 'bg-brand-600 text-white rounded-br-sm' : 'bg-white text-slate-800 rounded-bl-sm border border-slate-200 shadow-card'}`}>
+                  {msg.content}
+                </div>
+                {/* Per-message speak button — always shown on iOS (required for gesture), shown on desktop too as a convenience */}
+                {msg.role === 'assistant' && ttsEnabled && (
+                  <button
+                    onClick={() => speakReply(msg.content, msg.id)}
+                    title="Hear this message"
+                    className={`mt-1 ml-1 flex items-center gap-1 text-xs transition rounded-full px-2 py-0.5 ${
+                      speakingMsgId === msg.id
+                        ? 'text-brand-600 bg-brand-50 animate-pulse'
+                        : 'text-slate-300 hover:text-slate-500 hover:bg-slate-100'
+                    }`}
+                  >
+                    <Volume2 size={12} />
+                    {speakingMsgId === msg.id ? 'Speaking…' : 'Hear'}
+                  </button>
+                )}
               </div>
             </div>
           ))}
