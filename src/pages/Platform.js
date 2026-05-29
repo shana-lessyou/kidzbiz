@@ -94,6 +94,16 @@ const TASK_MODULES = {
 // ── Suggestion chips shown to kids when they might be stuck ───────────────
 // Sentence-starters the kid can tap to pre-fill the input. Shown for the
 // first 5 user messages so they're always handy early in a conversation.
+// OpenAI TTS voices — much higher quality than browser SpeechSynthesis
+const OPENAI_VOICES = [
+  { id: 'nova',    label: 'Nova — friendly & clear'      },
+  { id: 'shimmer', label: 'Shimmer — warm & gentle'      },
+  { id: 'alloy',   label: 'Alloy — neutral & calm'       },
+  { id: 'fable',   label: 'Fable — warm & expressive'    },
+  { id: 'echo',    label: 'Echo — soft & conversational' },
+  { id: 'onyx',    label: 'Onyx — deep & confident'      },
+];
+
 const STUCK_SUGGESTIONS = {
   'op-spot':         ["I already have an idea — I want to…", "I have a craft fair coming up", "I don't have an idea yet"],
   'part-decision':   ["I want to go solo", "I have a friend who might partner", "I'm not sure — help me think through it"],
@@ -385,9 +395,10 @@ function TaskModule({ task, phaseKey, child, businessId, familyId, onClose, onMa
   const [askParentMsg, setAskParentMsg]     = useState('');
   const [askParentSent, setAskParentSent]   = useState(false);
   const [ttsEnabled, setTtsEnabled]         = useState(() => getChildTtsEnabled(child.id));
-  const [voices, setVoices]                 = useState([]);
-  const [selectedVoiceName, setSelectedVoiceName] = useState(() => getChildVoiceName(child.id));
+  const [selectedVoice, setSelectedVoice]   = useState(() => getChildVoiceName(child.id) || 'nova');
   const [speaking, setSpeaking]             = useState(false);
+  const [ttsLoading, setTtsLoading]         = useState(false);
+  const currentAudioRef                     = useRef(null);
   const [printing, setPrinting]             = useState(false);
   const [pitchSent, setPitchSent]           = useState(false);
   const [priorCheck, setPriorCheck]         = useState(null); // null | 'loading' | { status, summary }
@@ -466,56 +477,77 @@ function TaskModule({ task, phaseKey, child, businessId, familyId, onClose, onMa
     setPitchSent(true);
   };
 
-  // Load browser TTS voices (async on some browsers)
+  // Stop audio when TTS is toggled off; clean up on unmount
   useEffect(() => {
-    const synth = window.speechSynthesis;
-    if (!synth) return;
-    const load = () => {
-      const en = synth.getVoices().filter((v) => v.lang.startsWith('en'));
-      setVoices(en);
-      setSelectedVoiceName((prev) => {
-        if (prev && en.find((v) => v.name === prev)) return prev; // keep saved preference
-        const def = en.find((v) => v.default) || en[0];
-        if (def) { saveChildVoiceName(child.id, def.name); return def.name; }
-        return prev;
-      });
-    };
-    load();
-    synth.addEventListener('voiceschanged', load);
-    return () => { synth.removeEventListener('voiceschanged', load); synth.cancel(); };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+    return () => { currentAudioRef.current?.pause(); };
+  }, []);
+
+  const stopAudio = () => {
+    if (currentAudioRef.current) { currentAudioRef.current.pause(); currentAudioRef.current = null; }
+    setSpeaking(false); setSpeakingMsgId(null); setTtsLoading(false);
+  };
 
   const toggleTts = () => {
     const next = !ttsEnabled;
     setTtsEnabled(next);
     saveChildTtsEnabled(child.id, next);
-    if (!next) window.speechSynthesis?.cancel();
+    if (!next) stopAudio();
   };
-  const changeVoice = (name) => {
-    setSelectedVoiceName(name);
-    saveChildVoiceName(child.id, name);
-    // Auto-preview so the kid can hear the voice immediately
-    const synth = window.speechSynthesis;
-    if (!synth) return;
-    synth.cancel();
-    const u = new SpeechSynthesisUtterance(`Hi ${child.name}! Ready to build your business?`);
-    const v = voices.find((vv) => vv.name === name);
-    if (v) u.voice = v;
-    u.rate = 0.88;
-    synth.speak(u);
+
+  const changeVoice = (id) => {
+    setSelectedVoice(id);
+    saveChildVoiceName(child.id, id);
+    // Preview the new voice immediately so the kid can hear it
+    playTTS(`Hi ${child.name}! Ready to build your business?`);
   };
-  const speakReply = (text, msgId = null) => {
-    const synth = window.speechSynthesis;
-    if (!synth || !ttsEnabled) return;
-    synth.cancel();
-    const u = new SpeechSynthesisUtterance(text);
-    const v = voices.find((vv) => vv.name === selectedVoiceName) || voices[0];
-    if (v) u.voice = v;
-    u.rate = 0.88;
-    u.onstart = () => { setSpeaking(true); setSpeakingMsgId(msgId); };
-    u.onend   = () => { setSpeaking(false); setSpeakingMsgId(null); };
-    u.onerror  = () => { setSpeaking(false); setSpeakingMsgId(null); };
-    synth.speak(u);
+
+  // OpenAI TTS — streams MP3 from edge function, plays via Audio element.
+  // Falls back to browser SpeechSynthesis in demo/offline mode.
+  const playTTS = async (text, msgId = null) => {
+    if (!ttsEnabled) return;
+    stopAudio();
+
+    if (!isConfigured || !supabase) {
+      // Demo fallback: browser synth (still robotic, but works offline)
+      const synth = window.speechSynthesis;
+      if (!synth) return;
+      const u = new SpeechSynthesisUtterance(text);
+      u.rate = 0.88;
+      u.onstart = () => { setSpeaking(true); setSpeakingMsgId(msgId); };
+      u.onend   = () => { setSpeaking(false); setSpeakingMsgId(null); };
+      synth.speak(u);
+      return;
+    }
+
+    setTtsLoading(true);
+    setSpeakingMsgId(msgId);
+    try {
+      const { data: { session: authSession } } = await supabase.auth.getSession();
+      if (!authSession) { stopAudio(); return; }
+
+      const res = await fetch(
+        `${process.env.REACT_APP_SUPABASE_URL}/functions/v1/tts`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authSession.access_token}` },
+          body: JSON.stringify({ text, voice: selectedVoice }),
+        }
+      );
+      if (!res.ok) throw new Error('TTS fetch failed');
+
+      const blob = await res.blob();
+      const url  = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      currentAudioRef.current = audio;
+
+      audio.onplay  = () => { setSpeaking(true); setTtsLoading(false); };
+      audio.onended = () => { stopAudio(); URL.revokeObjectURL(url); };
+      audio.onerror = () => { stopAudio(); URL.revokeObjectURL(url); };
+
+      await audio.play();
+    } catch (_) {
+      stopAudio();
+    }
   };
 
   // Persist chat after every exchange
@@ -593,7 +625,7 @@ function TaskModule({ task, phaseKey, child, businessId, familyId, onClose, onMa
 
   const handleSend = async () => {
     if (!input.trim()) return;
-    window.speechSynthesis?.cancel(); // stop any ongoing coach speech when kid sends
+    stopAudio(); // stop any ongoing coach speech when kid sends
     const userMsg = { id: Date.now(), role: 'user', content: input };
     const nextMessages = [...messages, userMsg];
     setMessages(nextMessages);
@@ -662,8 +694,8 @@ function TaskModule({ task, phaseKey, child, businessId, familyId, onClose, onMa
       const newMsgId = Date.now() + 1;
       setMessages((p) => [...p, { id: newMsgId, role: 'assistant', content: reply }]);
       setLoading(false);
-      // iOS blocks speak() from async callbacks — iOS users use the per-message tap button instead
-      if (reply && !isIOS) speakReply(reply, newMsgId);
+      // iOS blocks Audio.play() from async callbacks — iOS users tap the Hear button instead
+      if (reply && !isIOS) playTTS(reply, newMsgId);
     }, reply === null ? 0 : 200);
   };
 
@@ -760,22 +792,26 @@ function TaskModule({ task, phaseKey, child, businessId, familyId, onClose, onMa
         </div>
 
         {/* Voice picker — shown when TTS is on */}
-        {ttsEnabled && voices.length > 0 && (
+        {ttsEnabled && (
           <div className="px-5 py-2 border-b border-slate-100 bg-slate-50 flex items-center gap-3">
             <span className="text-xs text-slate-500 font-medium shrink-0 flex items-center gap-1.5">
               <Volume2 size={12} /> Voice:
             </span>
             <select
-              value={selectedVoiceName}
+              value={selectedVoice}
               onChange={(e) => changeVoice(e.target.value)}
               className="flex-1 min-w-0 text-xs px-2 py-1.5 rounded-lg border border-slate-200 bg-white focus:outline-none focus:ring-1 focus:ring-brand-500 transition"
             >
-              {voices.map((v) => (
-                <option key={v.name} value={v.name}>{v.name}</option>
+              {OPENAI_VOICES.map((v) => (
+                <option key={v.id} value={v.id}>{v.label}</option>
               ))}
             </select>
             {isIOS ? (
               <span className="text-xs text-slate-400 shrink-0">Tap "Hear" on any message</span>
+            ) : ttsLoading ? (
+              <span className="text-xs text-slate-400 shrink-0 flex items-center gap-1">
+                <div className="w-3 h-3 rounded-full border-2 border-brand-400 border-t-transparent animate-spin" /> Loading…
+              </span>
             ) : speaking ? (
               <span className="text-xs text-brand-600 font-semibold shrink-0 flex items-center gap-1 animate-pulse">
                 <Volume2 size={12} /> Speaking…
@@ -856,19 +892,21 @@ function TaskModule({ task, phaseKey, child, businessId, familyId, onClose, onMa
                 <div className={`rounded-2xl px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap w-full ${msg.role === 'user' ? 'bg-brand-600 text-white rounded-br-sm' : 'bg-white text-slate-800 rounded-bl-sm border border-slate-200 shadow-card'}`}>
                   {msg.content}
                 </div>
-                {/* Per-message speak button — always shown on iOS (required for gesture), shown on desktop too as a convenience */}
+                {/* Per-message Hear button — primary on iOS (gesture required), convenience replay on desktop */}
                 {msg.role === 'assistant' && ttsEnabled && (
                   <button
-                    onClick={() => speakReply(msg.content, msg.id)}
-                    title="Hear this message"
+                    onClick={() => speakingMsgId === msg.id ? stopAudio() : playTTS(msg.content, msg.id)}
+                    title={speakingMsgId === msg.id ? 'Stop' : 'Hear this message'}
                     className={`mt-1 ml-1 flex items-center gap-1 text-xs transition rounded-full px-2 py-0.5 ${
                       speakingMsgId === msg.id
-                        ? 'text-brand-600 bg-brand-50 animate-pulse'
+                        ? ttsLoading
+                          ? 'text-slate-400 bg-slate-100'
+                          : 'text-brand-600 bg-brand-50 animate-pulse'
                         : 'text-slate-300 hover:text-slate-500 hover:bg-slate-100'
                     }`}
                   >
                     <Volume2 size={12} />
-                    {speakingMsgId === msg.id ? 'Speaking…' : 'Hear'}
+                    {speakingMsgId === msg.id ? (ttsLoading ? 'Loading…' : 'Stop') : 'Hear'}
                   </button>
                 )}
               </div>
