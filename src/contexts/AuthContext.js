@@ -4,8 +4,9 @@ import { supabase, isConfigured } from '../lib/supabase';
 const AuthContext = createContext(null);
 
 export function AuthProvider({ children }) {
-  const [session, setSession]   = useState(undefined); // undefined = loading
-  const [family,  setFamily]    = useState(null);
+  const [session, setSession]               = useState(undefined); // undefined = loading
+  const [family,  setFamily]                = useState(null);
+  const [isPasswordRecovery, setIsPasswordRecovery] = useState(false);
 
   useEffect(() => {
     if (!isConfigured) {
@@ -17,8 +18,14 @@ export function AuthProvider({ children }) {
       setSession(session ?? null);
     });
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      setSession(session ?? null);
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      if (event === 'PASSWORD_RECOVERY') {
+        setIsPasswordRecovery(true);
+        setSession(session ?? null); // session is needed so updateUser works
+      } else {
+        setIsPasswordRecovery(false); // clears on USER_UPDATED, SIGNED_OUT, etc.
+        setSession(session ?? null);
+      }
     });
 
     return () => subscription.unsubscribe();
@@ -56,7 +63,7 @@ export function AuthProvider({ children }) {
   const signOut = () => supabase.auth.signOut();
 
   return (
-    <AuthContext.Provider value={{ session, family, setFamily, signUp, signIn, signOut, isConfigured }}>
+    <AuthContext.Provider value={{ session, family, setFamily, signUp, signIn, signOut, isConfigured, isPasswordRecovery }}>
       {children}
     </AuthContext.Provider>
   );

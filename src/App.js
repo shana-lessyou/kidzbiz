@@ -6,7 +6,7 @@ import AuthPage    from './pages/AuthPage';
 import Platform    from './pages/Platform';
 
 function AppRoutes() {
-  const { session, isConfigured } = useAuth();
+  const { session, isConfigured, isPasswordRecovery } = useAuth();
   const loading = session === undefined;
 
   if (loading) {
@@ -28,10 +28,10 @@ function AppRoutes() {
         }
       />
 
-      {/* Auth (login / sign-up) */}
+      {/* Auth (login / sign-up / password reset) */}
       <Route path="/login"
         element={
-          session ? <Navigate to="/app" replace /> : <AuthPage />
+          session && !isPasswordRecovery ? <Navigate to="/app" replace /> : <AuthPage />
         }
       />
 
