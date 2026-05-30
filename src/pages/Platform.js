@@ -404,6 +404,7 @@ function TaskModule({ task, phaseKey, child, businessId, familyId, onClose, onMa
   const [ttsLoading, setTtsLoading]         = useState(false);
   const [ttsError, setTtsError]             = useState('');
   const currentAudioRef                     = useRef(null);
+  const audioUnlockedRef                    = useRef(false);
   const [printing, setPrinting]             = useState(false);
   const [pitchSent, setPitchSent]           = useState(false);
   const [priorCheck, setPriorCheck]         = useState(null); // null | 'loading' | { status, summary }
@@ -493,16 +494,35 @@ function TaskModule({ task, phaseKey, child, businessId, familyId, onClose, onMa
   };
   const showTtsError = (msg) => { setTtsError(msg); setTimeout(() => setTtsError(''), 5000); };
 
+  // Unlock browser audio on first real user gesture — required by autoplay policy so
+  // audio.play() works later from async callbacks (after two fetch() awaits).
+  const unlockAudio = () => {
+    if (audioUnlockedRef.current) return;
+    try {
+      const AudioContext = window.AudioContext || window.webkitAudioContext;
+      if (!AudioContext) return;
+      const ctx = new AudioContext();
+      const buf = ctx.createBuffer(1, 1, 22050);
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.connect(ctx.destination);
+      src.start(0);
+      ctx.resume().then(() => { audioUnlockedRef.current = true; });
+    } catch (_) {}
+  };
+
   const toggleTts = () => {
     const next = !ttsEnabled;
     setTtsEnabled(next);
     saveChildTtsEnabled(child.id, next);
-    if (!next) stopAudio();
+    if (next) unlockAudio(); // user gesture — unlock audio so async play() works
+    else stopAudio();
   };
 
   const changeVoice = (id) => {
     setSelectedVoice(id);
     saveChildVoiceName(child.id, id);
+    unlockAudio(); // user just interacted with the dropdown
     // Preview the new voice immediately so the kid can hear it
     playTTS(`Hi ${child.name}! Ready to build your business?`);
   };
@@ -928,7 +948,7 @@ function TaskModule({ task, phaseKey, child, businessId, familyId, onClose, onMa
                 {/* Per-message Hear button — primary on iOS (gesture required), convenience replay on desktop */}
                 {msg.role === 'assistant' && ttsEnabled && (
                   <button
-                    onClick={() => speakingMsgId === msg.id ? stopAudio() : playTTS(msg.content, msg.id)}
+                    onClick={() => { unlockAudio(); speakingMsgId === msg.id ? stopAudio() : playTTS(msg.content, msg.id); }}
                     title={speakingMsgId === msg.id ? 'Stop' : 'Hear this message'}
                     className={`mt-1 ml-1 flex items-center gap-1 text-xs transition rounded-full px-2 py-0.5 ${
                       speakingMsgId === msg.id
