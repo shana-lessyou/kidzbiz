@@ -395,9 +395,14 @@ function TaskModule({ task, phaseKey, child, businessId, familyId, onClose, onMa
   const [askParentMsg, setAskParentMsg]     = useState('');
   const [askParentSent, setAskParentSent]   = useState(false);
   const [ttsEnabled, setTtsEnabled]         = useState(() => getChildTtsEnabled(child.id));
-  const [selectedVoice, setSelectedVoice]   = useState(() => getChildVoiceName(child.id) || 'nova');
+  const [selectedVoice, setSelectedVoice]   = useState(() => {
+    const saved = getChildVoiceName(child.id);
+    // Validate — reject old browser voice names like "Samantha", fall back to nova
+    return OPENAI_VOICES.find((v) => v.id === saved) ? saved : 'nova';
+  });
   const [speaking, setSpeaking]             = useState(false);
   const [ttsLoading, setTtsLoading]         = useState(false);
+  const [ttsError, setTtsError]             = useState('');
   const currentAudioRef                     = useRef(null);
   const [printing, setPrinting]             = useState(false);
   const [pitchSent, setPitchSent]           = useState(false);
@@ -486,6 +491,7 @@ function TaskModule({ task, phaseKey, child, businessId, familyId, onClose, onMa
     if (currentAudioRef.current) { currentAudioRef.current.pause(); currentAudioRef.current = null; }
     setSpeaking(false); setSpeakingMsgId(null); setTtsLoading(false);
   };
+  const showTtsError = (msg) => { setTtsError(msg); setTimeout(() => setTtsError(''), 5000); };
 
   const toggleTts = () => {
     const next = !ttsEnabled;
@@ -533,19 +539,44 @@ function TaskModule({ task, phaseKey, child, businessId, familyId, onClose, onMa
           body: JSON.stringify({ text, voice: selectedVoice }),
         }
       );
-      if (!res.ok) throw new Error('TTS fetch failed');
+
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+        const msg = errJson.error || `HTTP ${res.status}`;
+        console.error('TTS error:', msg);
+        showTtsError(msg.includes('OPENAI_API_KEY') ? 'Add OPENAI_API_KEY to Supabase secrets' : `Voice unavailable: ${msg}`);
+        stopAudio();
+        return;
+      }
 
       const blob = await res.blob();
+      if (blob.size === 0) { console.error('TTS: empty audio blob'); stopAudio(); return; }
+
       const url  = URL.createObjectURL(blob);
       const audio = new Audio(url);
       currentAudioRef.current = audio;
 
       audio.onplay  = () => { setSpeaking(true); setTtsLoading(false); };
       audio.onended = () => { stopAudio(); URL.revokeObjectURL(url); };
-      audio.onerror = () => { stopAudio(); URL.revokeObjectURL(url); };
+      audio.onerror = (e) => {
+        console.error('Audio playback error:', e);
+        showTtsError('Audio failed to play — tap Hear to retry');
+        stopAudio();
+        URL.revokeObjectURL(url);
+      };
 
-      await audio.play();
-    } catch (_) {
+      try {
+        await audio.play();
+      } catch (playErr) {
+        // Browser autoplay policy blocks async audio — user must tap Hear
+        console.error('audio.play() blocked:', playErr.name, playErr.message);
+        showTtsError('Tap "Hear" on a message to hear the voice');
+        stopAudio();
+        URL.revokeObjectURL(url);
+      }
+    } catch (err) {
+      console.error('playTTS error:', err);
+      showTtsError(`Voice error: ${err.message || 'unknown'}`);
       stopAudio();
     }
   };
@@ -806,7 +837,9 @@ function TaskModule({ task, phaseKey, child, businessId, familyId, onClose, onMa
                 <option key={v.id} value={v.id}>{v.label}</option>
               ))}
             </select>
-            {isIOS ? (
+            {ttsError ? (
+              <span className="text-xs text-rose-600 shrink-0 font-medium">{ttsError}</span>
+            ) : isIOS ? (
               <span className="text-xs text-slate-400 shrink-0">Tap "Hear" on any message</span>
             ) : ttsLoading ? (
               <span className="text-xs text-slate-400 shrink-0 flex items-center gap-1">
