@@ -553,6 +553,10 @@ function TaskModule({ task, phaseKey, child, businessId, familyId, onClose, onMa
     if (!ttsEnabled) return;
     stopAudio();
 
+    // iOS/Safari: AudioContext MUST be created synchronously before the first await.
+    // Once we cross an async boundary, Safari revokes the user-gesture privilege.
+    if (isIOS) getAudioCtx();
+
     if (!isConfigured || !supabase) {
       // Demo fallback: browser synth (still robotic, but works offline)
       const synth = window.speechSynthesis;
@@ -1164,61 +1168,79 @@ function KidDashboard({ child, business, familyId, config, onBack }) {
   const [parentRequestMsg, setParentRequestMsg]   = useState('');
   const [requestSent, setRequestSent]             = useState(false);
   const [sidebarListening, setSidebarListening]   = useState(false);
-  const [sideTts, setSideTts]                     = useState(() => getChildTtsEnabled(child.id));
-  const [sideVoices, setSideVoices]               = useState([]);
-  const [sideVoiceName, setSideVoiceName]         = useState(() => getChildVoiceName(child.id));
-  const [sideSpeaking, setSideSpeaking]           = useState(false);
+  const [sideTtsEnabled, setSideTtsEnabled]       = useState(() => getChildTtsEnabled(child.id));
+  const [sideTtsLoading, setSideTtsLoading]       = useState(false);
+  const [sideSpeakingMsgId, setSideSpeakingMsgId] = useState(null);
+  // eslint-disable-next-line no-unused-vars
+  const [sideTtsError, setSideTtsError]           = useState('');
   const messagesEndRef    = useRef(null);
   const sidebarRecRef     = useRef(null);
+  const sideAudioRef      = useRef(null);
+  const sideAudioCtxRef   = useRef(null);
+  const isIOS = isIOSDevice();
 
-  // Load TTS voices for sidebar
-  useEffect(() => {
-    const synth = window.speechSynthesis;
-    if (!synth) return;
-    const load = () => {
-      const en = synth.getVoices().filter((v) => v.lang.startsWith('en'));
-      setSideVoices(en);
-      setSideVoiceName((prev) => {
-        if (prev && en.find((v) => v.name === prev)) return prev;
-        const def = en.find((v) => v.default) || en[0];
-        if (def) { saveChildVoiceName(child.id, def.name); return def.name; }
-        return prev;
-      });
-    };
-    load();
-    synth.addEventListener('voiceschanged', load);
-    return () => { synth.removeEventListener('voiceschanged', load); synth.cancel(); };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
+  const getSideAudioCtx = () => {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return null;
+    if (!sideAudioCtxRef.current) sideAudioCtxRef.current = new AudioCtx();
+    if (sideAudioCtxRef.current.state === 'suspended') sideAudioCtxRef.current.resume();
+    return sideAudioCtxRef.current;
+  };
+  const stopSideAudio = () => {
+    if (sideAudioRef.current) {
+      try {
+        if (typeof sideAudioRef.current.pause === 'function') sideAudioRef.current.pause();
+        else if (typeof sideAudioRef.current.stop === 'function') sideAudioRef.current.stop();
+      } catch (_) {}
+      sideAudioRef.current = null;
+    }
+    setSideSpeakingMsgId(null); setSideTtsLoading(false);
+  };
   const toggleSideTts = () => {
-    const next = !sideTts;
-    setSideTts(next);
+    const next = !sideTtsEnabled;
+    setSideTtsEnabled(next);
     saveChildTtsEnabled(child.id, next);
-    if (!next) window.speechSynthesis?.cancel();
+    if (!next) stopSideAudio();
   };
-  const changeSideVoice = (name) => {
-    setSideVoiceName(name);
-    saveChildVoiceName(child.id, name);
-    const synth = window.speechSynthesis;
-    if (!synth) return;
-    synth.cancel();
-    const u = new SpeechSynthesisUtterance(`Hi ${child.name}! Ask me anything.`);
-    const v = sideVoices.find((vv) => vv.name === name);
-    if (v) u.voice = v;
-    u.rate = 0.88;
-    synth.speak(u);
-  };
-  const speakSideReply = (text) => {
-    const synth = window.speechSynthesis;
-    if (!synth || !sideTts) return;
-    synth.cancel();
-    const u = new SpeechSynthesisUtterance(text);
-    const v = sideVoices.find((vv) => vv.name === sideVoiceName) || sideVoices[0];
-    if (v) u.voice = v;
-    u.rate = 0.88;
-    u.onstart = () => setSideSpeaking(true);
-    u.onend   = () => setSideSpeaking(false);
-    synth.speak(u);
+  const playSideTTS = async (text, msgId = null) => {
+    if (!sideTtsEnabled) return;
+    stopSideAudio();
+    // iOS: prime AudioContext synchronously before first await
+    if (isIOS) getSideAudioCtx();
+    if (!isConfigured || !supabase) return;
+    setSideTtsLoading(true); setSideSpeakingMsgId(msgId);
+    try {
+      const { data: { session: authSession } } = await supabase.auth.getSession();
+      if (!authSession) { stopSideAudio(); return; }
+      const voice = (() => { const s = getChildVoiceName(child.id); return OPENAI_VOICES.find(v => v.id === s) ? s : 'nova'; })();
+      const res = await fetch(`${process.env.REACT_APP_SUPABASE_URL}/functions/v1/tts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authSession.access_token}` },
+        body: JSON.stringify({ text: String(text).slice(0, 1000), voice }),
+      });
+      if (!res.ok) { stopSideAudio(); return; }
+      const arrayBuffer = await res.arrayBuffer();
+      if (arrayBuffer.byteLength === 0) { stopSideAudio(); return; }
+      if (isIOS) {
+        const ctx = getSideAudioCtx();
+        if (!ctx) { stopSideAudio(); return; }
+        const decoded = await ctx.decodeAudioData(arrayBuffer);
+        const source = ctx.createBufferSource();
+        source.buffer = decoded; source.connect(ctx.destination);
+        sideAudioRef.current = source;
+        source.onended = () => stopSideAudio();
+        setSideTtsLoading(false);
+        source.start(0);
+      } else {
+        const url = URL.createObjectURL(new Blob([arrayBuffer], { type: 'audio/mpeg' }));
+        const audio = new Audio(url);
+        sideAudioRef.current = audio;
+        audio.onended = () => { stopSideAudio(); URL.revokeObjectURL(url); };
+        audio.onerror = () => { stopSideAudio(); URL.revokeObjectURL(url); };
+        setSideTtsLoading(false);
+        try { await audio.play(); } catch (_) { stopSideAudio(); URL.revokeObjectURL(url); }
+      }
+    } catch (err) { console.error('sidebar TTS error:', err); stopSideAudio(); }
   };
 
   const startSidebarListening = () => {
@@ -1315,7 +1337,7 @@ function KidDashboard({ child, business, familyId, config, onBack }) {
 
   const handleSendMessage = async () => {
     if (!input.trim()) return;
-    window.speechSynthesis?.cancel();
+    stopSideAudio();
     const userMsg = { id: Date.now(), role: 'user', content: input };
     const nextMessages = [...messages, userMsg];
     setMessages(nextMessages);
@@ -1375,9 +1397,10 @@ function KidDashboard({ child, business, familyId, config, onBack }) {
     if (!reply) {
       reply = `Good question! Click a task card to work through it step by step, or keep asking me here — I'm here to help ${business.name} succeed.`;
     }
-    setMessages((p) => [...p, { id: Date.now() + 1, role: 'assistant', content: reply }]);
+    const newMsgId = Date.now() + 1;
+    setMessages((p) => [...p, { id: newMsgId, role: 'assistant', content: reply }]);
     setLoading(false);
-    if (reply) speakSideReply(reply);
+    if (reply && !isIOS) playSideTTS(reply, newMsgId);
   };
 
   const currentPhase = CURRICULUM_TASKS[activePhase];
@@ -1527,32 +1550,25 @@ function KidDashboard({ child, business, familyId, config, onBack }) {
             <div className="w-8 h-8 rounded-full bg-accent-100 text-accent-700 flex items-center justify-center shrink-0"><MessageCircle size={16} /></div>
             <div className="flex-1 min-w-0">
               <p className="font-semibold text-slate-900 leading-tight">Ask {child.coachName} anything</p>
-              {sideTts && sideVoices.length > 0 ? (
-                <div className="flex items-center gap-1.5 mt-0.5">
-                  <Volume2 size={10} className="text-brand-500 shrink-0" />
-                  <select
-                    value={sideVoiceName}
-                    onChange={(e) => changeSideVoice(e.target.value)}
-                    className="text-xs px-1.5 py-0.5 rounded border border-slate-200 bg-white focus:outline-none focus:ring-1 focus:ring-brand-500 transition w-full"
-                  >
-                    {sideVoices.map((v) => <option key={v.name} value={v.name}>{v.name}</option>)}
-                  </select>
-                  {sideSpeaking && <span className="text-[10px] text-brand-600 font-semibold shrink-0 animate-pulse">Speaking…</span>}
-                </div>
-              ) : (
-                <p className="text-xs text-slate-500">General questions, brainstorming, quick advice</p>
-              )}
+              <p className="text-xs text-slate-500">General questions, brainstorming, quick advice</p>
             </div>
-            {window.speechSynthesis && (
-              <button onClick={toggleSideTts} title={sideTts ? 'Mute coach voice' : 'Hear coach speak'} className={`shrink-0 p-1.5 rounded-lg transition ${sideTts ? 'bg-brand-100 text-brand-700 hover:bg-brand-200' : 'hover:bg-slate-100 text-slate-500'}`}>
-                {sideTts ? <Volume2 size={15} /> : <VolumeX size={15} />}
-              </button>
-            )}
+            <button onClick={toggleSideTts} title={sideTtsEnabled ? 'Mute coach voice' : 'Hear coach speak'} className={`shrink-0 p-1.5 rounded-lg transition ${sideTtsEnabled ? 'bg-brand-100 text-brand-700 hover:bg-brand-200' : 'hover:bg-slate-100 text-slate-500'}`}>
+              {sideTtsEnabled ? <Volume2 size={15} /> : <VolumeX size={15} />}
+            </button>
           </div>
           <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-slate-50/50">
             {messages.map((msg) => (
-              <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+              <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'} flex-col items-${msg.role === 'user' ? 'end' : 'start'}`}>
                 <div className={`max-w-md rounded-2xl px-3.5 py-2.5 text-sm leading-relaxed ${msg.role === 'user' ? 'bg-brand-600 text-white rounded-br-md' : 'bg-white text-slate-800 rounded-bl-md border border-slate-200 whitespace-pre-wrap'}`}>{msg.content}</div>
+                {msg.role === 'assistant' && sideTtsEnabled && (
+                  <button
+                    onClick={() => sideSpeakingMsgId === msg.id ? stopSideAudio() : playSideTTS(msg.content, msg.id)}
+                    className={`mt-1 flex items-center gap-1 text-xs rounded-full px-2 py-0.5 transition ${sideSpeakingMsgId === msg.id ? 'text-brand-600 bg-brand-50 animate-pulse' : 'text-slate-300 hover:text-slate-500 hover:bg-slate-100'}`}
+                  >
+                    <Volume2 size={11} />
+                    {sideSpeakingMsgId === msg.id ? (sideTtsLoading ? 'Loading…' : 'Stop') : 'Hear'}
+                  </button>
+                )}
               </div>
             ))}
             {loading && <div className="flex justify-start"><div className="bg-white text-slate-500 text-sm rounded-2xl rounded-bl-md border border-slate-200 px-3.5 py-2.5">{child.coachName} is thinking…</div></div>}
