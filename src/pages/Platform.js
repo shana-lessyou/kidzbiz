@@ -261,6 +261,10 @@ function getBizNotes(bizId) {
 }
 function saveBizNotes(bizId, notes) { localStorage.setItem(`kb_biz_notes_${bizId}`, notes); }
 
+// Parent PIN helpers
+function getParentPin(familyId) { return localStorage.getItem(`kb_parent_pin_${familyId}`) || ''; }
+function saveParentPin(familyId, pin) { localStorage.setItem(`kb_parent_pin_${familyId}`, pin); }
+
 // iOS detection — Chrome on iPhone is WebKit and blocks async speechSynthesis.speak()
 const isIOSDevice = () =>
   /iPad|iPhone|iPod/.test(navigator.userAgent) ||
@@ -403,7 +407,9 @@ function TaskModule({ task, phaseKey, child, businessId, familyId, onClose, onMa
   const [speaking, setSpeaking]             = useState(false);
   const [ttsLoading, setTtsLoading]         = useState(false);
   const [ttsError, setTtsError]             = useState('');
+  const [showVoicePrefs, setShowVoicePrefs] = useState(false);
   const currentAudioRef                     = useRef(null);
+  const audioCtxRef                         = useRef(null);
   const audioUnlockedRef                    = useRef(false);
   const [printing, setPrinting]             = useState(false);
   const [pitchSent, setPitchSent]           = useState(false);
@@ -488,8 +494,22 @@ function TaskModule({ task, phaseKey, child, businessId, familyId, onClose, onMa
     return () => { currentAudioRef.current?.pause(); };
   }, []);
 
+  const getAudioCtx = () => {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return null;
+    if (!audioCtxRef.current) audioCtxRef.current = new AudioCtx();
+    if (audioCtxRef.current.state === 'suspended') audioCtxRef.current.resume();
+    return audioCtxRef.current;
+  };
+
   const stopAudio = () => {
-    if (currentAudioRef.current) { currentAudioRef.current.pause(); currentAudioRef.current = null; }
+    if (currentAudioRef.current) {
+      try {
+        if (typeof currentAudioRef.current.pause === 'function') currentAudioRef.current.pause();
+        else if (typeof currentAudioRef.current.stop === 'function') currentAudioRef.current.stop();
+      } catch (_) {}
+      currentAudioRef.current = null;
+    }
     setSpeaking(false); setSpeakingMsgId(null); setTtsLoading(false);
   };
   const showTtsError = (msg) => { setTtsError(msg); setTimeout(() => setTtsError(''), 5000); };
@@ -569,30 +589,43 @@ function TaskModule({ task, phaseKey, child, businessId, familyId, onClose, onMa
         return;
       }
 
-      const blob = await res.blob();
-      if (blob.size === 0) { console.error('TTS: empty audio blob'); stopAudio(); return; }
+      const arrayBuffer = await res.arrayBuffer();
+      if (arrayBuffer.byteLength === 0) { stopAudio(); return; }
 
-      const url  = URL.createObjectURL(blob);
-      const audio = new Audio(url);
-      currentAudioRef.current = audio;
-
-      audio.onplay  = () => { setSpeaking(true); setTtsLoading(false); };
-      audio.onended = () => { stopAudio(); URL.revokeObjectURL(url); };
-      audio.onerror = (e) => {
-        console.error('Audio playback error:', e);
-        showTtsError('Audio failed to play — tap Hear to retry');
-        stopAudio();
-        URL.revokeObjectURL(url);
-      };
-
-      try {
-        await audio.play();
-      } catch (playErr) {
-        // Browser autoplay policy blocks async audio — user must tap Hear
-        console.error('audio.play() blocked:', playErr.name, playErr.message);
-        showTtsError('Tap "Hear" on a message to hear the voice');
-        stopAudio();
-        URL.revokeObjectURL(url);
+      if (isIOS) {
+        // AudioContext stays running after user gesture, bypasses WebKit autoplay block
+        const audioCtx = getAudioCtx();
+        if (!audioCtx) { stopAudio(); return; }
+        try {
+          const decoded = await audioCtx.decodeAudioData(arrayBuffer);
+          const source = audioCtx.createBufferSource();
+          source.buffer = decoded;
+          source.connect(audioCtx.destination);
+          currentAudioRef.current = source;
+          source.onended = () => stopAudio();
+          setSpeaking(true); setTtsLoading(false);
+          source.start(0);
+        } catch (decodeErr) {
+          console.error('AudioContext decode error:', decodeErr);
+          showTtsError('Audio decode failed — try again');
+          stopAudio();
+        }
+      } else {
+        const blob = new Blob([arrayBuffer], { type: 'audio/mpeg' });
+        const url = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        currentAudioRef.current = audio;
+        audio.onplay  = () => { setSpeaking(true); setTtsLoading(false); };
+        audio.onended = () => { stopAudio(); URL.revokeObjectURL(url); };
+        audio.onerror = (e) => { console.error('Audio error:', e); showTtsError('Audio failed — tap Hear to retry'); stopAudio(); URL.revokeObjectURL(url); };
+        try {
+          await audio.play();
+        } catch (playErr) {
+          console.error('audio.play() blocked:', playErr.name, playErr.message);
+          showTtsError('Tap "Hear" on a message to hear the voice');
+          stopAudio();
+          URL.revokeObjectURL(url);
+        }
       }
     } catch (err) {
       console.error('playTTS error:', err);
@@ -838,39 +871,40 @@ function TaskModule({ task, phaseKey, child, businessId, familyId, onClose, onMa
                 {ttsEnabled ? <Volume2 size={18} /> : <VolumeX size={18} />}
               </button>
             )}
+            {ttsEnabled && (
+              <button
+                onClick={() => setShowVoicePrefs((v) => !v)}
+                title="Voice settings"
+                className={`shrink-0 p-1.5 rounded-lg transition ${showVoicePrefs ? 'bg-slate-100 text-slate-700' : 'hover:bg-slate-100 text-slate-400'}`}
+              >
+                <Settings size={16} />
+              </button>
+            )}
             <button onClick={handlePrint} title="Print worksheet" className="shrink-0 p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 transition"><Printer size={18} /></button>
             <button onClick={onClose} className="shrink-0 p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 transition"><X size={18} /></button>
           </div>
         </div>
 
-        {/* Voice picker — shown when TTS is on */}
-        {ttsEnabled && (
-          <div className="px-5 py-2 border-b border-slate-100 bg-slate-50 flex items-center gap-3">
-            <span className="text-xs text-slate-500 font-medium shrink-0 flex items-center gap-1.5">
-              <Volume2 size={12} /> Voice:
-            </span>
+        {/* Voice prefs popover — shown when TTS is on and gear icon clicked */}
+        {ttsEnabled && showVoicePrefs && (
+          <div className="px-5 py-3 border-b border-slate-100 bg-white flex items-center gap-3 flex-wrap">
+            <span className="text-xs font-semibold text-slate-600 shrink-0">Voice:</span>
             <select
               value={selectedVoice}
               onChange={(e) => changeVoice(e.target.value)}
-              className="flex-1 min-w-0 text-xs px-2 py-1.5 rounded-lg border border-slate-200 bg-white focus:outline-none focus:ring-1 focus:ring-brand-500 transition"
+              className="text-xs px-2 py-1.5 rounded-lg border border-slate-200 bg-white focus:outline-none focus:ring-1 focus:ring-brand-500 transition"
             >
               {OPENAI_VOICES.map((v) => (
                 <option key={v.id} value={v.id}>{v.label}</option>
               ))}
             </select>
-            {ttsError ? (
-              <span className="text-xs text-rose-600 shrink-0 font-medium">{ttsError}</span>
-            ) : isIOS ? (
-              <span className="text-xs text-slate-400 shrink-0">Tap "Hear" on any message</span>
-            ) : ttsLoading ? (
-              <span className="text-xs text-slate-400 shrink-0 flex items-center gap-1">
-                <div className="w-3 h-3 rounded-full border-2 border-brand-400 border-t-transparent animate-spin" /> Loading…
-              </span>
-            ) : speaking ? (
-              <span className="text-xs text-brand-600 font-semibold shrink-0 flex items-center gap-1 animate-pulse">
-                <Volume2 size={12} /> Speaking…
-              </span>
-            ) : null}
+            {ttsError && <span className="text-xs text-rose-600 font-medium">{ttsError}</span>}
+            <button onClick={() => setShowVoicePrefs(false)} className="ml-auto text-xs text-slate-400 hover:text-slate-600">Done</button>
+          </div>
+        )}
+        {ttsEnabled && !showVoicePrefs && ttsError && (
+          <div className="px-5 py-2 border-b border-slate-100 bg-rose-50">
+            <span className="text-xs text-rose-600 font-medium">{ttsError}</span>
           </div>
         )}
 
@@ -1715,9 +1749,9 @@ function FamilyHub({ onOpenParent }) {
   const { session, family, signOut } = useAuth();
   const [children, setChildren]     = useState([]);
   const [loading, setLoading]       = useState(true);
-  const [pinEntry, setPinEntry]     = useState(null); // child object awaiting PIN
-  const [pin, setPin]               = useState('');
-  const [pinError, setPinError]     = useState('');
+  const [parentPinEntry, setParentPinEntry] = useState(false); // true = parent PIN modal showing
+  const [parentPinInput, setParentPinInput] = useState('');
+  const [parentPinError, setParentPinError] = useState('');
   const [config] = useState({ timelines: { phase0: '2026-05-16', phase1: '2026-05-31', phase2: '2026-06-07', phase3: '2026-06-21', phase4: '2026-06-30' }, budgetMin: 50, budgetMax: 500 });
   const [activeChild, setActiveChild] = useState(null);
   const [pendingCount, setPendingCount] = useState(0);
@@ -1776,16 +1810,6 @@ function FamilyHub({ onOpenParent }) {
     setShowAddChild(false); setAddingChild(false);
   };
 
-  const handlePinSubmit = () => {
-    if (pin === pinEntry.pin || pin === (pinEntry.pin_hash || pinEntry.pin)) {
-      setActiveChild({ ...pinEntry, coachName: pinEntry.coach_name });
-      setPinEntry(null); setPin(''); setPinError('');
-    } else {
-      setPinError('Wrong PIN. Try again.');
-      setPin('');
-    }
-  };
-
   if (activeChild) {
     return <BusinessHub child={activeChild} familyId={session?.user?.id || 'demo'} config={config} onBack={() => setActiveChild(null)} />;
   }
@@ -1798,20 +1822,52 @@ function FamilyHub({ onOpenParent }) {
           onClose={() => setShowUpgradeGate(false)}
         />
       )}
-      {/* PIN modal */}
-      {pinEntry && (
+      {parentPinEntry && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-sm">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-xs p-7">
-            <div className="flex justify-center mb-4"><Avatar name={pinEntry.name} /></div>
-            <h2 className="text-center font-bold text-slate-900 text-lg">{pinEntry.name}</h2>
-            <p className="text-center text-sm text-slate-500 mt-1">Enter your 4-digit PIN</p>
-            <div className="mt-5 space-y-3">
-              <input type="password" maxLength={4} value={pin} onChange={(e) => setPin(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && handlePinSubmit()} autoFocus className="w-full px-3.5 py-3 rounded-lg border border-slate-300 bg-white text-center text-2xl font-bold text-slate-900 tracking-[0.5em] focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-brand-500 transition" placeholder="••••" />
-              {pinError && <p className="text-center text-xs text-rose-600">{pinError}</p>}
-              <button onClick={handlePinSubmit} disabled={pin.length < 4} className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-brand-600 text-white font-semibold text-sm hover:bg-brand-700 disabled:opacity-50 transition">Continue <ChevronRight size={16} /></button>
-              <button onClick={() => { setPinEntry(null); setPin(''); setPinError(''); }} className="w-full inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg border border-slate-300 text-slate-600 text-sm font-medium hover:bg-slate-50 transition">Cancel</button>
+            <div className="flex justify-center mb-4">
+              <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-brand-500 to-accent-500 flex items-center justify-center">
+                <Settings size={22} className="text-white" />
+              </div>
             </div>
-            {!isConfigured && <p className="text-center text-xs text-slate-400 mt-3">Demo PIN: 1234</p>}
+            <h2 className="text-center font-bold text-slate-900 text-lg">Parent settings</h2>
+            <p className="text-center text-sm text-slate-500 mt-1">Enter your parent PIN</p>
+            <div className="mt-5 space-y-3">
+              <input
+                type="password" maxLength={6} value={parentPinInput}
+                onChange={(e) => setParentPinInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    const stored = getParentPin(session?.user?.id || 'demo');
+                    if (parentPinInput === stored) {
+                      setParentPinEntry(false); setParentPinInput(''); setParentPinError('');
+                      onOpenParent();
+                    } else { setParentPinError('Wrong PIN. Try again.'); setParentPinInput(''); }
+                  }
+                }}
+                autoFocus
+                className="w-full px-3.5 py-3 rounded-lg border border-slate-300 bg-white text-center text-2xl font-bold text-slate-900 tracking-[0.5em] focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-brand-500 transition"
+                placeholder="••••"
+              />
+              {parentPinError && <p className="text-center text-xs text-rose-600">{parentPinError}</p>}
+              <button
+                onClick={() => {
+                  const stored = getParentPin(session?.user?.id || 'demo');
+                  if (parentPinInput === stored) {
+                    setParentPinEntry(false); setParentPinInput(''); setParentPinError('');
+                    onOpenParent();
+                  } else { setParentPinError('Wrong PIN. Try again.'); setParentPinInput(''); }
+                }}
+                disabled={parentPinInput.length < 4}
+                className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-brand-600 text-white font-semibold text-sm hover:bg-brand-700 disabled:opacity-50 transition"
+              >
+                Open settings <ChevronRight size={16} />
+              </button>
+              <button
+                onClick={() => { setParentPinEntry(false); setParentPinInput(''); setParentPinError(''); }}
+                className="w-full inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg border border-slate-300 text-slate-600 text-sm font-medium hover:bg-slate-50 transition"
+              >Cancel</button>
+            </div>
           </div>
         </div>
       )}
@@ -1820,7 +1876,14 @@ function FamilyHub({ onOpenParent }) {
         <div className="max-w-5xl mx-auto px-6 h-16 flex items-center justify-between">
           <Logo size="sm" />
           <div className="flex items-center gap-2">
-            <button onClick={onOpenParent} className="relative inline-flex items-center gap-2 px-3 py-2 rounded-lg text-slate-600 text-sm font-medium hover:bg-slate-100 transition">
+            <button
+              onClick={() => {
+                const stored = getParentPin(session?.user?.id || 'demo');
+                if (!stored) { onOpenParent(); }
+                else { setParentPinEntry(true); }
+              }}
+              className="relative inline-flex items-center gap-2 px-3 py-2 rounded-lg text-slate-600 text-sm font-medium hover:bg-slate-100 transition"
+            >
               <Settings size={16} /> Settings
               {pendingCount > 0 && <span className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-rose-500 text-white text-[10px] font-bold flex items-center justify-center">{pendingCount}</span>}
             </button>
@@ -1868,7 +1931,7 @@ function FamilyHub({ onOpenParent }) {
         ) : (
           <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-4">
             {children.map((child) => (
-              <button key={child.id} onClick={() => setPinEntry(child)} className="bg-white rounded-xl border border-slate-200 p-5 text-left hover:border-brand-300 hover:shadow-cardHover transition group shadow-card">
+              <button key={child.id} onClick={() => setActiveChild({ ...child, coachName: child.coach_name })} className="bg-white rounded-xl border border-slate-200 p-5 text-left hover:border-brand-300 hover:shadow-cardHover transition group shadow-card">
                 <div className="flex items-center gap-3 mb-4">
                   <div className="w-12 h-12 rounded-full bg-gradient-to-br from-brand-100 to-accent-100 text-brand-700 flex items-center justify-center text-xl font-bold ring-1 ring-brand-200">{child.name.charAt(0).toUpperCase()}</div>
                   <div>
@@ -1885,6 +1948,41 @@ function FamilyHub({ onOpenParent }) {
           </div>
         )}
       </main>
+    </div>
+  );
+}
+
+function ParentPinSetter({ familyId }) {
+  const [current, setCurrent] = useState(getParentPin(familyId));
+  const [input, setInput]     = useState('');
+  const [saved, setSaved]     = useState(false);
+  const handleSave = () => {
+    if (input.length < 4) return;
+    saveParentPin(familyId, input);
+    setCurrent(input);
+    setInput('');
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
+  };
+  return (
+    <div className="space-y-3">
+      {current && <p className="text-xs text-emerald-700 font-semibold flex items-center gap-1"><CheckCircle2 size={13} /> PIN is set. Enter a new one below to change it.</p>}
+      {!current && <p className="text-xs text-amber-700 flex items-center gap-1">⚠️ No PIN set — Settings is currently unprotected.</p>}
+      <div className="flex gap-2 items-center">
+        <input
+          type="password" maxLength={6} value={input}
+          onChange={(e) => setInput(e.target.value.replace(/\D/g, ''))}
+          placeholder="New PIN (4–6 digits)"
+          className="flex-1 px-3 py-2 rounded-lg border border-slate-300 text-sm text-center tracking-widest focus:outline-none focus:ring-2 focus:ring-brand-500 transition"
+        />
+        <button
+          onClick={handleSave} disabled={input.length < 4}
+          className="px-4 py-2 rounded-lg bg-brand-600 text-white font-semibold text-sm hover:bg-brand-700 disabled:opacity-50 transition"
+        >{saved ? 'Saved!' : 'Set PIN'}</button>
+      </div>
+      {current && (
+        <button onClick={() => { saveParentPin(familyId, ''); setCurrent(''); }} className="text-xs text-rose-600 hover:underline">Remove PIN (leave unprotected)</button>
+      )}
     </div>
   );
 }
@@ -2610,6 +2708,13 @@ Keep it under 300 words. Be honest but encouraging.`;
                   <span className={`absolute top-0.5 ${coachCfg.amazonLinks ? 'left-5' : 'left-0.5'} h-5 w-5 rounded-full bg-white shadow transition-all`} />
                 </button>
               </div>
+            </div>
+
+            {/* ── Parent PIN ── */}
+            <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-card">
+              <h3 className="font-semibold text-slate-900 mb-1">Parent console PIN</h3>
+              <p className="text-sm text-slate-500 mb-3">Set a PIN to protect the parent settings area. Kids won't need a PIN to access their own business — only you will need one to open Settings.</p>
+              <ParentPinSetter familyId={session?.user?.id || 'demo'} />
             </div>
           </section>
         )}
