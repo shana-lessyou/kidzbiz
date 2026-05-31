@@ -5,7 +5,7 @@ import {
   Sparkles, GripVertical, Search, Target, Wrench, Palette,
   Mic, Package, BookOpen, BarChart3, Flag, ChevronRight,
   X, CheckCircle2, Link as LinkIcon, Settings, ArrowLeft, Printer, Bell, BarChart2,
-  Volume2, VolumeX, Lock, Unlock,
+  Volume2, VolumeX, Lock, Unlock, ChevronDown,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { supabase, isConfigured } from '../lib/supabase';
@@ -706,6 +706,7 @@ function TaskModule({ task, phaseKey, child, businessId, familyId, onClose, onMa
                 taskIntro: mod?.intro,
                 offLimitsTopics: coachCfg.offLimitsTopics,
                 seedIdeas: task.id === 'op-spot' ? coachCfg.seedIdeas : '',
+                familyNotes: coachCfg.parentNotes || '',
                 priorContext: getPriorTaskContext(businessId, task.id),
                 childConfig: getChildConfig(child.id),
                 businessNotes: getBizNotes(businessId),
@@ -1320,6 +1321,7 @@ function KidDashboard({ child, business, familyId, config, onBack }) {
                 taskTitle: 'General Business Coaching',
                 taskIntro: `You are the ongoing coach for ${child.name}'s business "${business.name}". Answer questions, help them think through problems, and encourage them to keep making progress. Be personal and reference their specific business.`,
                 offLimitsTopics: coachCfg.offLimitsTopics,
+                familyNotes: coachCfg.parentNotes || '',
                 priorContext: allTaskContext,
                 childConfig: getChildConfig(child.id),
                 businessNotes: getBizNotes(business.id),
@@ -1907,6 +1909,7 @@ function ParentConsole({ onBack }) {
   const [bizNotesDraft, setBizNotesDraft]   = useState({});      // bizId → string
   const [pitchGateDraft, setPitchGateDraft] = useState({});      // bizId → gate cfg
   const [summaries, setSummaries]           = useState({});      // bizId → { loading, text }
+  const [promptOpen, setPromptOpen]         = useState(false);   // coach tab → locked-rules accordion
 
   const updateCoachCfg = (partial) => {
     const next = { ...coachCfg, ...partial };
@@ -2468,31 +2471,115 @@ Keep it under 300 words. Be honest but encouraging.`;
         )}
 
         {activeTab === 'coach' && (
-          <section className="space-y-6 max-w-2xl">
-            {/* Safe mode — always on */}
-            <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-4 flex items-start gap-3">
-              <CheckCircle2 size={18} className="text-emerald-600 shrink-0 mt-0.5" />
-              <div>
-                <p className="font-semibold text-slate-900">Safe mode — always on</p>
-                <p className="text-sm text-slate-600 mt-0.5">The AI coach is pre-configured to be age-appropriate, encouraging, and free of adult content. This setting cannot be turned off.</p>
+          <section className="space-y-5 max-w-2xl">
+            <div>
+              <h2 className="text-lg font-semibold text-slate-900 mb-1">AI Coach Configuration</h2>
+              <p className="text-slate-500 text-sm">See exactly what your child's AI coach is instructed to do — and customize the parts that apply to your family.</p>
+            </div>
+
+            {/* ── LOCKED: What the coach is always told ── */}
+            <div className="rounded-xl border border-slate-200 shadow-card overflow-hidden">
+              <button
+                onClick={() => setPromptOpen((v) => !v)}
+                className="w-full flex items-center justify-between gap-3 px-5 py-4 bg-slate-50 hover:bg-slate-100 transition text-left"
+              >
+                <div className="flex items-center gap-2.5">
+                  <Lock size={15} className="text-slate-400 shrink-0" />
+                  <span className="font-semibold text-slate-900 text-sm">What the coach is always told</span>
+                  <span className="text-xs text-slate-400 font-normal">— cannot be changed</span>
+                </div>
+                <ChevronDown size={16} className={`text-slate-400 transition-transform ${promptOpen ? 'rotate-180' : ''}`} />
+              </button>
+              {promptOpen && (
+                <div className="px-5 py-4 bg-white space-y-3 border-t border-slate-100">
+                  <p className="text-xs text-slate-500 mb-3">These rules protect kids and keep the program legally compliant. They are always active and cannot be overridden by any message.</p>
+                  {[
+                    { icon: '🛡️', label: 'Age-appropriate content only', desc: 'Never discusses adult content, violence, politics, gambling, alcohol, drugs, or weapons.' },
+                    { icon: '🚫', label: 'No personal information', desc: 'Never shares or asks for personal details. If a child seems distressed, it gently suggests talking to a trusted adult.' },
+                    { icon: '🤔', label: 'Guides, never tells', desc: 'Asks questions to help kids think for themselves rather than just giving answers.' },
+                    { icon: '🎉', label: 'Encourages effort over results', desc: 'Celebrates trying and learning, not just winning. Patient with all ages.' },
+                    { icon: '🎙️', label: 'Short, conversational replies', desc: 'Responses are brief and designed to be heard aloud — not read like an essay.' },
+                    { icon: '🎯', label: 'Stays on task', desc: 'Focuses on the current task only and moves on when it\'s done.' },
+                  ].map(({ icon, label, desc }) => (
+                    <div key={label} className="flex items-start gap-3 p-3 rounded-lg bg-slate-50">
+                      <span className="text-base shrink-0 mt-0.5">{icon}</span>
+                      <div>
+                        <p className="text-sm font-semibold text-slate-800">{label}</p>
+                        <p className="text-xs text-slate-500 mt-0.5">{desc}</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* ── EDITABLE: Off-limits topics ── */}
+            <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-card">
+              <div className="flex items-start justify-between gap-3 mb-1">
+                <h3 className="font-semibold text-slate-900">Additional off-limits topics</h3>
+                {coachCfg.offLimitsTopics !== DEFAULT_COACH_CONFIG.offLimitsTopics && (
+                  <button
+                    onClick={() => updateCoachCfg({ offLimitsTopics: DEFAULT_COACH_CONFIG.offLimitsTopics })}
+                    className="text-xs text-brand-600 hover:underline shrink-0 font-medium"
+                  >Reset to default</button>
+                )}
               </div>
+              <p className="text-sm text-slate-500 mb-3">The coach already avoids adult content by default. Add anything specific to your family — products, themes, or subjects you want excluded.</p>
+              <textarea
+                value={coachCfg.offLimitsTopics}
+                onChange={(e) => updateCoachCfg({ offLimitsTopics: e.target.value })}
+                placeholder="e.g. anything involving animals, political messaging, fast food"
+                rows={2}
+                className="w-full px-3 py-2.5 rounded-lg border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 transition resize-none"
+              />
+              <p className="text-xs text-slate-400 mt-2">✏️ You can edit this. The coach will add these to its built-in restrictions.</p>
             </div>
 
-            {/* Seed ideas */}
+            {/* ── EDITABLE: Business ideas to suggest ── */}
             <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-card">
-              <h3 className="font-semibold text-slate-900 mb-1">Starter ideas for your child</h3>
-              <p className="text-sm text-slate-500 mb-3">Optional. If you have ideas that suit your child's interests or skills, add them here. The coach will mention them during Opportunity Spotting.</p>
-              <textarea value={coachCfg.seedIdeas} onChange={(e) => updateCoachCfg({ seedIdeas: e.target.value })} placeholder="e.g. She loves baking and has been making cupcakes for family for years. He is really good at drawing and could sell art prints." rows={3} className="w-full px-3 py-2.5 rounded-lg border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 transition resize-none" />
+              <div className="flex items-start justify-between gap-3 mb-1">
+                <h3 className="font-semibold text-slate-900">Business ideas to suggest</h3>
+                {coachCfg.seedIdeas && (
+                  <button
+                    onClick={() => updateCoachCfg({ seedIdeas: '' })}
+                    className="text-xs text-brand-600 hover:underline shrink-0 font-medium"
+                  >Clear</button>
+                )}
+              </div>
+              <p className="text-sm text-slate-500 mb-3">Optional. The coach will gently mention these during the Opportunity Spotting task if they fit. Your child can use them or go a totally different direction.</p>
+              <textarea
+                value={coachCfg.seedIdeas}
+                onChange={(e) => updateCoachCfg({ seedIdeas: e.target.value })}
+                placeholder="e.g. She loves baking and has been making cupcakes for years. He's really good at drawing."
+                rows={3}
+                className="w-full px-3 py-2.5 rounded-lg border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 transition resize-none"
+              />
+              <p className="text-xs text-slate-400 mt-2">✏️ You can edit this. Leave blank if you want the coach to let your child discover ideas on their own.</p>
             </div>
 
-            {/* Off-limits topics */}
+            {/* ── EDITABLE: Coaching style note ── */}
             <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-card">
-              <h3 className="font-semibold text-slate-900 mb-1">Additional off-limits topics</h3>
-              <p className="text-sm text-slate-500 mb-3">The coach already avoids adult content by default. Add anything else specific to your family — products, themes, or subjects you want excluded.</p>
-              <textarea value={coachCfg.offLimitsTopics} onChange={(e) => updateCoachCfg({ offLimitsTopics: e.target.value })} placeholder="e.g. anything involving animals, political messaging, fast food" rows={2} className="w-full px-3 py-2.5 rounded-lg border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 transition resize-none" />
+              <div className="flex items-start justify-between gap-3 mb-1">
+                <h3 className="font-semibold text-slate-900">Extra notes for the coach</h3>
+                {coachCfg.parentNotes && (
+                  <button
+                    onClick={() => updateCoachCfg({ parentNotes: '' })}
+                    className="text-xs text-brand-600 hover:underline shrink-0 font-medium"
+                  >Clear</button>
+                )}
+              </div>
+              <p className="text-sm text-slate-500 mb-3">Anything else you want the coach to know? Tone preferences, motivational style, context about your family, or things to be especially encouraging about.</p>
+              <textarea
+                value={coachCfg.parentNotes || ''}
+                onChange={(e) => updateCoachCfg({ parentNotes: e.target.value })}
+                placeholder="e.g. Maya gets frustrated easily — please be extra patient and celebrate small wins. Leo tends to overthink, so help him commit to a direction."
+                rows={3}
+                className="w-full px-3 py-2.5 rounded-lg border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 transition resize-none"
+              />
+              <p className="text-xs text-slate-400 mt-2">✏️ You can edit this. Per-child profile settings (grade, learning style, accommodations) are set on each child's card in the Progress tab.</p>
             </div>
 
-            {/* Parent approval required */}
+            {/* ── Parent approval gates ── */}
             <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-card">
               <h3 className="font-semibold text-slate-900 mb-1">Parent approval required for</h3>
               <p className="text-sm text-slate-500 mb-4">The coach will flag these steps and prompt your child to ask you before proceeding.</p>
@@ -2512,12 +2599,12 @@ Keep it under 300 words. Be honest but encouraging.`;
               </div>
             </div>
 
-            {/* Supply ordering */}
+            {/* ── Amazon links toggle ── */}
             <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-card">
               <div className="flex items-start justify-between gap-4">
                 <div>
                   <h3 className="font-semibold text-slate-900">Show Amazon search links in supply lists</h3>
-                  <p className="text-sm text-slate-500 mt-1">After the Cost Breakdown task, your child will see a button to search Amazon for their supplies. No account connection needed — just a quick search link.</p>
+                  <p className="text-sm text-slate-500 mt-1">After the Cost Breakdown task, your child will see a button to search Amazon for their supplies. No account connection needed.</p>
                 </div>
                 <button onClick={() => updateCoachCfg({ amazonLinks: !coachCfg.amazonLinks })} role="switch" aria-checked={coachCfg.amazonLinks} className={`relative inline-flex h-6 w-11 shrink-0 rounded-full transition ${coachCfg.amazonLinks ? 'bg-brand-600' : 'bg-slate-300'}`}>
                   <span className={`absolute top-0.5 ${coachCfg.amazonLinks ? 'left-5' : 'left-0.5'} h-5 w-5 rounded-full bg-white shadow transition-all`} />

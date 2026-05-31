@@ -56,6 +56,7 @@ serve(async (req) => {
       childId,         // uuid — for usage logging
       businessId,      // uuid — for usage logging
       taskId,          // string — for usage logging
+      familyNotes,     // string — parent's free-text notes about coaching style/preferences
       callType,        // 'chat' | 'artifact' | 'vision' — default 'chat'
       artifactType,    // 'price-check' | 'interview-sheet' | 'production-tracker' | 'business-plan'
       summaryMode,     // boolean — if true, generate a parent-facing progress summary
@@ -112,6 +113,10 @@ serve(async (req) => {
     // ── Business-specific parent notes ─────────────────────────────────────
     if (businessNotes && businessNotes.trim()) {
       dynamicParts.push(`\nPARENT NOTES FOR THIS BUSINESS: ${businessNotes.trim()}`);
+    }
+    // ── Family-level coaching style notes ──────────────────────────────────
+    if (familyNotes && familyNotes.trim()) {
+      dynamicParts.push(`\nPARENT COACHING PREFERENCES: ${familyNotes.trim()}`);
     }
     dynamicParts.push(`\nRESPONSE FORMAT (STRICT):
 - Maximum 40 words per reply. 1–2 short sentences, then one direct question. Never more.
