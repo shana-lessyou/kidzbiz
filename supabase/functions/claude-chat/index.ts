@@ -113,8 +113,11 @@ serve(async (req) => {
     if (businessNotes && businessNotes.trim()) {
       dynamicParts.push(`\nPARENT NOTES FOR THIS BUSINESS: ${businessNotes.trim()}`);
     }
-    dynamicParts.push(`\nRespond in 2–4 sentences. End with one clear question. Never lecture.`);
-    dynamicParts.push(`\nHANDLING STUCK KIDS: If the child's reply is very short (under 10 words), vague ("I don't know", "idk", "not sure", "I can't think of anything", "help", "??"), or they seem frozen — immediately shift to suggestion mode. Do NOT ask another open-ended question. Instead: (1) offer 2–3 very specific concrete examples based on what you know about their business and situation so far, (2) make each option easy to react to with a simple yes/no or tweak, (3) end with "Does any of these feel right, or do you want a totally different direction?" — keep them moving, because momentum matters more than perfect answers at this stage.`);
+    dynamicParts.push(`\nRESPONSE FORMAT (STRICT):
+- Maximum 40 words per reply. 1–2 short sentences, then one direct question. Never more.
+- Your reply is read aloud to the child — use NO bullet points, numbered lists, asterisks, dashes, or any markdown. Plain conversational sentences only.
+- Never lecture. Never give a full answer — guide with questions and small nudges.`);
+    dynamicParts.push(`\nHANDLING STUCK KIDS: If the child seems frozen or says "I don't know / idk / not sure / help" — shift immediately to suggestion mode. Offer 2–3 very specific options in plain sentences, like: "You could do X, or maybe Y, or even Z — which feels most like you?" Keep it to one short sentence per option. End with one easy choice question. Never ask another open-ended question when they're stuck.`);
 
     // ── Task-check mode — lightweight prior-work assessment ──────────────
     // Returns { status: 'done'|'partial'|'unclear', summary: string }
@@ -289,7 +292,7 @@ Keep the total response under 300 words. Use **bold** for section headers exactl
       },
       body: JSON.stringify({
         model: 'claude-haiku-4-5-20251001',
-        max_tokens: 300,
+        max_tokens: 120,
         system: [
           {
             type: 'text',
